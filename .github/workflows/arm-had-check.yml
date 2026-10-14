@@ -34,7 +34,7 @@ jobs:
           exit $status
 
   bench:
-    name: "Hadamard kernels, master against this branch (${{ matrix.os }})"
+    name: "Hadamard kernels, master against this branch (${{ matrix.os }}, ${{ matrix.cxx }})"
     strategy:
       fail-fast: false
       matrix:
@@ -43,25 +43,24 @@ jobs:
             cc: gcc-14
             cxx: g++-14
             simd: "NEON SVE2"
-          - os: macos-latest
-            cc: clang
-            cxx: clang++
+          - os: ubuntu-24.04-arm
+            cc: clang-18
+            cxx: clang++-18
             simd: "NEON"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Install GCC 14
-        if: ${{ startsWith( matrix.os, 'ubuntu' ) }}
-        run: sudo apt-get update && sudo apt-get install -y g++-14
+      - name: Install GCC 14 and Clang 18
+        run: sudo apt-get update && sudo apt-get install -y g++-14 clang-18
       - name: Build master and this branch
         shell: bash
         run: |
           git worktree add ../master b401ac9
           for v in master fix; do
             src=.; [ $v = master ] && src=../master
-            cmake -S $src -B ../build-$v -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+            cmake -S $src -B ../build-$v -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DVVENC_ENABLE_LINK_TIME_OPT=OFF \
                   -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} > ../cmake-$v.log
             grep "AArch64" ../cmake-$v.log
             cmake --build ../build-$v --target vvenc -j 4 > /dev/null
