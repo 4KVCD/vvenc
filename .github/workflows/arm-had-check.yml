@@ -1,0 +1,81 @@
+# Temporary checks for the Arm Hadamard fix, run only on this fork's neon-had-check branch (not part of the pull
+# request): the SVE2 kernels, which the regular CI does not build, and the speed of the changed kernels.
+name: Arm Hadamard check
+
+on:
+  push:
+    branches: [neon-had-check]
+
+jobs:
+  sve2-unit-test:
+    name: "RdCost unit tests with SVE2, SVE and NEON (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: CPU
+        run: lscpu
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 | tee cmake.log
+          grep "AArch64 SVE2 intrinsics enabled" cmake.log
+          cmake --build build --target vvenc_unit_test
+      - name: Run
+        shell: bash
+        run: |
+          status=0
+          for simd in SVE2 SVE NEON; do
+            build/bin/vvenc_unit_test --SIMD=$simd --testcase=RdCost --seed=1 > ut_$simd.log || status=1
+            head -1 ut_$simd.log; grep -A1 "failed:" ut_$simd.log | head -40; tail -2 ut_$simd.log
+          done
+          exit $status
+
+  bench:
+    name: "Hadamard kernels, master against this branch (${{ matrix.os }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+            cc: gcc-14
+            cxx: g++-14
+            simd: "NEON SVE2"
+          - os: macos-latest
+            cc: clang
+            cxx: clang++
+            simd: "NEON"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install GCC 14
+        if: ${{ startsWith( matrix.os, 'ubuntu' ) }}
+        run: sudo apt-get update && sudo apt-get install -y g++-14
+      - name: Build master and this branch
+        shell: bash
+        run: |
+          git worktree add ../master b401ac9
+          for v in master fix; do
+            src=.; [ $v = master ] && src=../master
+            cmake -S $src -B ../build-$v -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} > ../cmake-$v.log
+            grep "AArch64" ../cmake-$v.log
+            cmake --build ../build-$v --target vvenc -j 4 > /dev/null
+            ${{ matrix.cxx }} -O2 -std=c++14 -I$src/source/Lib -I$src/include -I../build-$v \
+                .github/arm-had-check/bench_had.cpp ../build-$v/lib/libvvenc.a -lpthread -o ../bench-$v
+          done
+      - name: Run (three rounds, alternating)
+        shell: bash
+        run: |
+          for simd in ${{ matrix.simd }}; do
+            for round in 1 2 3; do
+              for v in master fix; do
+                echo "== $v, round $round"
+                ../bench-$v $simd 2000000
+              done
+            done
+          done
