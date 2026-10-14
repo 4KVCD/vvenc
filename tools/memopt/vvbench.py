@@ -85,6 +85,10 @@ CONFIGS = {
     "bk600_1080p_medium_t32_f65": config("bk600_1080p", "medium", 28, 65, threads=32),
     "bk600_2160p_medium_f65": config("bk600_2160p", "medium", 28, 65),
     "bk600_2160p_medium_t32_f65": config("bk600_2160p", "medium", 28, 65, threads=32),
+    # The slow and slower presets reuse CU results, which costs memory per worker thread.
+    "bk600_1080p_slow_t32": config("bk600_1080p", "slow", 28, 17, threads=32),
+    "bk600_1080p_slower_t32": config("bk600_1080p", "slower", 28, 9, threads=32),
+    "bk600_2160p_slow_t32": config("bk600_2160p", "slow", 28, 9, threads=32),
 }
 
 SUITES = {
@@ -167,7 +171,9 @@ def run_encode(exe, cfg, out_path):
     busy_after = system_busy_seconds()
     cpu, peak_ws, peak_commit, page_faults = child_stats(int(proc._handle))
     if proc.returncode != 0:
-        raise RuntimeError(f"encode failed ({proc.returncode}): {' '.join(cmd)}\n{output[-3000:]}")
+        # Sanitizer reports can be longer than the tail kept here, so their error lines come first.
+        errors = [line for line in output.splitlines() if "ERROR: AddressSanitizer" in line or "SUMMARY: AddressSanitizer" in line]
+        raise RuntimeError(f"encode failed ({proc.returncode}): {' '.join(cmd)}\n" + "\n".join(errors) + f"\n{output[-3000:]}")
 
     with open(out_path, "rb") as f:
         digest = hashlib.md5(f.read()).hexdigest()
@@ -226,7 +232,9 @@ def cmd_check(args):
     for name in names:
         cfg = CONFIGS[name]
         base = baseline_result(name, cfg, cache)
-        cand = run_encode(args.cand, cfg, os.path.join(BENCH_DIR, "out", f"cand_{name}.266"))
+        # The build's folder is part of the name, so that checks of other builds running at the same
+        # time cannot overwrite this bitstream before its hash is taken.
+        cand = run_encode(args.cand, cfg, os.path.join(BENCH_DIR, "out", f"cand_{label_of(args.cand)}_{name}.266"))
         same = cand["md5"] == base["md5"]
         failures += 0 if same else 1
         print(f"{'OK  ' if same else 'DIFF'} {name:28s} {cand['md5']} {cand['wall']:7.1f}s  peak commit {cand['peak_commit_mb']:6.0f} MB  working set {cand['peak_ws_mb']:6.0f} MB"
@@ -259,7 +267,8 @@ def cmd_time(args):
                   f"  cpu {statistics.median(r['cpu_percent'] for r in cand):5.1f}%"
                   f"  commit {statistics.median(r['peak_commit_mb'] for r in cand):6.0f} MB"
                   f"  working set {statistics.median(r['peak_ws_mb'] for r in cand):6.0f} MB"
-                  f"  others max {others:4.1f}%{same}", flush=True)
+                  f"  others max {others:4.1f}%{same}"
+                  f"  rounds {' '.join('%.3f' % r['fps'] for r in cand)}", flush=True)
     return 0
 
 
