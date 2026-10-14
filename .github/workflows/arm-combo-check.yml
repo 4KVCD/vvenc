@@ -52,14 +52,17 @@ jobs:
       - name: Bitstreams
         shell: bash
         run: |
-          for preset in faster fast medium slow; do
-            for v in master overflow generic both; do
-              line="$preset $v:"
-              for simd in SCALAR NEON SVE2; do
-                ../build-$v/bin/vvencFFapp -c cfg/randomaccess_$preset.cfg -i clip.yuv --SourceWidth=416 \
-                  --SourceHeight=240 --FrameRate=30 --InputBitDepth=8 -f 9 --Threads=1 --SIMD=$simd -b out.266 > /dev/null
-                line="$line $simd $(md5sum < out.266 | cut -c1-12)"
+          # MCTF's SIMD applyBlock may differ from the C code by one (see vvenc_unit_test), so also without MCTF
+          for mctf in on off; do
+            extra=""; [ $mctf = off ] && extra="--MCTF=0 --BIM=0"
+            for preset in faster fast medium slow; do
+              for v in master overflow generic both; do
+                line="MCTF $mctf, $preset $v:"
+                for simd in SCALAR NEON SVE2; do
+                  ../build-$v/bin/vvencFFapp -c cfg/randomaccess_$preset.cfg -i clip.yuv --SourceWidth=416                     --SourceHeight=240 --FrameRate=30 --InputBitDepth=8 -f 9 --Threads=1 $extra --SIMD=$simd                     -b out.266 > /dev/null
+                  line="$line $simd $(md5sum < out.266 | cut -c1-12)"
+                done
+                echo "$line"
               done
-              echo "$line"
             done
           done
