@@ -1,5 +1,5 @@
 # Temporary speed checks for the Arm Hadamard fix, run only on this fork's neon-had-perf* branches (not part of the
-# pull request): variants of the Neon 16x8 kernel (.github/arm-had-check/vars.cpp, see make_vars.py) with GCC and Clang.
+# pull request): variants of the Neon 16x8 kernel (.github/arm-had-check/vars.cpp, see make_vars2.py) with GCC and Clang.
 name: Arm Hadamard perf
 
 on:
@@ -28,8 +28,8 @@ jobs:
             $cxx $flags -c .github/arm-had-check/vars.cpp -o vars_$c.o
             $cxx vars_$c.o build/lib/libvvenc.a -lpthread -o vars_$c
             echo "== $c"
-            for v in 0 1 2 3 4; do
-              sym=$(nm vars_$c.o | grep -o "_ZN5vvenc10had16x8_V${v}E[A-Za-z0-9_]*" | head -1)
+            for v in 0 1 2; do
+              sym=$(nm vars_$c.o | grep -o "_ZN5vvenc20xCalcHAD16x8_neon_V${v}E[A-Za-z0-9_]*" | head -1)
               objdump -d --no-show-raw-insn --disassemble=$sym vars_$c.o > ${c}_v$v.s
               n=$(grep -cP '^\s+[0-9a-f]+:\t' ${c}_v$v.s || true)
               sp=$(grep -cP '\[sp' ${c}_v$v.s || true)
@@ -42,7 +42,7 @@ jobs:
         run: taskset -c 2 ./vars_clang 2000000
       - name: Disassembly, GCC
         shell: bash
-        run: for v in 0 1 2 3 4; do echo "######## V$v"; cat gcc_v$v.s; done
+        run: for v in 0 1 2; do echo "######## V$v"; cat gcc_v$v.s; done
       - name: Disassembly, Clang
         shell: bash
-        run: for v in 0 1 2 3 4; do echo "######## V$v"; cat clang_v$v.s; done
+        run: for v in 0 1 2; do echo "######## V$v"; cat clang_v$v.s; done
