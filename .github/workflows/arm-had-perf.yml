@@ -16,7 +16,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y g++-14 clang-18 ninja-build
       - name: Build the library (for the C reference)
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DVVENC_ENABLE_LINK_TIME_OPT=OFF \
                 -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null
           cmake --build build --target vvenc > /dev/null
       - name: Build the variants, count their instructions
