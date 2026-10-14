@@ -112,6 +112,12 @@ public:
   void destroyCoeffs();
   void createMotionBuf();
   void destroyMotionBuf();
+  // Other pictures read an encoded picture's motion only for temporal motion vector prediction,
+  // which reads it on an 8x8 grid. compressMotionBuf keeps just that grid to save memory.
+  void compressMotionBuf();
+  bool hasMotionBuf() const           { return m_motionBuf || m_motionBufCompressed; }
+  bool hasCompressedMotionBuf() const { return m_motionBufCompressed != nullptr; }
+  const MotionInfo& getColocatedMotionInfo( const Position& pos ) const;
 
   void allocateVectorsAtPicLevel();
   void releaseVectorsAtPicLevel();
@@ -210,6 +216,7 @@ private:
   int               m_dmvrMvCacheOffset;
 
   MotionInfo*       m_motionBuf;
+  MotionInfo*       m_motionBufCompressed;
 
   LoopFilterParam*  m_lfParam[NUM_EDGE_DIR];
 

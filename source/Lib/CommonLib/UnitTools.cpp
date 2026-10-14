@@ -1442,7 +1442,7 @@ bool CU::getColocatedMVP(const CodingUnit& cu, const RefPicList refPicList, cons
 
   RefPicList eColRefPicList = slice.checkLDC ? refPicList : RefPicList(slice.colFromL0Flag);
 
-  const MotionInfo& mi = pColPic->cs->getMotionInfo( pos );
+  const MotionInfo& mi = pColPic->cs->getColocatedMotionInfo( pos );
 
   if( !mi.isInter() )
   {
@@ -2427,7 +2427,7 @@ bool CU::getInterMergeSbTMVPCand(const CodingUnit& cu, AffineMergeCtx& mrgCtx, c
   centerPos = Position{ PosType(centerPos.x & mask), PosType(centerPos.y & mask) };
 
   // derivation of center motion parameters from the collocated CU
-  const MotionInfo &mi = pColPic->cs->getMotionInfo(centerPos);
+  const MotionInfo &mi = pColPic->cs->getColocatedMotionInfo(centerPos);
 
   if (mi.isInter())
   {
@@ -2475,7 +2475,7 @@ bool CU::getInterMergeSbTMVPCand(const CodingUnit& cu, AffineMergeCtx& mrgCtx, c
 
       colPos = Position{ PosType(colPos.x & mask), PosType(colPos.y & mask) };
 
-      const MotionInfo &colMi = pColPic->cs->getMotionInfo(colPos);
+      const MotionInfo &colMi = pColPic->cs->getColocatedMotionInfo(colPos);
 
       MotionInfo mi;
 

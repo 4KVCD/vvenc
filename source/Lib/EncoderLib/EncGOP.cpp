@@ -342,6 +342,9 @@ void EncGOP::processPictures( const PicList& picList, AccessUnitList& auList, Pi
   // release pictures not needed anymore
   xReleasePictures( picList, freeList );
 
+  // shrink the motion fields of encoded pictures that later pictures still read
+  xCompressReferenceMotion( picList );
+
   // clear output access unit
   if( m_isPreAnalysis )
   {
@@ -732,6 +735,55 @@ void EncGOP::xReleasePictures( const PicList& picList, PicList& freeList )
       // picture object is reused and its next picture starts encoding.
       pic->releaseEncodingBuffers();
       freeList.push_back( pic );
+    }
+  }
+}
+
+static bool isReferencedBy( const Picture& pic, const Picture& ref )
+{
+  for( const Slice* slice : pic.slices )
+  {
+    for( int list = 0; list < NUM_REF_PIC_LIST_01; list++ )
+    {
+      for( int i = 0; i < slice->numRefIdx[ list ]; i++ )
+      {
+        if( slice->refPicList[ list ][ i ] == &ref )
+        {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+void EncGOP::xCompressReferenceMotion( const PicList& picList )
+{
+  // A picture gets its motion field when its encoding starts, so a picture that has one but is not
+  // reconstructed yet is being encoded. Its tasks may be reading the motion fields of its reference
+  // pictures right now, so those stay as they are until it is reconstructed. Pictures start
+  // encoding only on this thread, so no picture starts while this runs.
+  std::vector<const Picture*> beingEncoded;
+  for( const Picture* pic : picList )
+  {
+    if( pic->cs && pic->cs->hasMotionBuf() && !pic->isReconstructed )
+    {
+      beingEncoded.push_back( pic );
+    }
+  }
+
+  for( Picture* pic : picList )
+  {
+    const bool hasFullMotionBuf = pic->cs && pic->cs->hasMotionBuf() && !pic->cs->hasCompressedMotionBuf();
+    if( !hasFullMotionBuf || !pic->isReconstructed )
+    {
+      continue;
+    }
+
+    const bool isReadNow = std::any_of( beingEncoded.begin(), beingEncoded.end(), [pic]( const Picture* encPic ) { return isReferencedBy( *encPic, *pic ); } );
+    if( !isReadNow )
+    {
+      pic->cs->compressMotionBuf();
     }
   }
 }

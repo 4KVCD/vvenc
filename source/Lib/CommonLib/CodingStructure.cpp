@@ -91,6 +91,7 @@ CodingStructure::CodingStructure( XUCache& unitCache, std::mutex* mutex )
   }
 
   m_motionBuf = nullptr;
+  m_motionBufCompressed = nullptr;
 
   m_numTUs = m_numCUs = 0;
 }
@@ -668,12 +669,61 @@ void CodingStructure::createMotionBuf()
   {
     m_motionBuf = new MotionInfo[g_miScaling.scale( area.lumaSize() ).area()];
   }
+
+  // Reads must go to the full field from now on, so drop a compressed one left from an earlier encode.
+  delete[] m_motionBufCompressed;
+  m_motionBufCompressed = nullptr;
 }
 
 void CodingStructure::destroyMotionBuf()
 {
   delete[] m_motionBuf;
   m_motionBuf = nullptr;
+  delete[] m_motionBufCompressed;
+  m_motionBufCompressed = nullptr;
+}
+
+// Temporal motion vector prediction reads the motion of other pictures on this grid (see
+// CU::getColocatedMVP), so a compressed motion field holds one motion per grid cell.
+static constexpr int COL_MOTION_GRID_LOG2 = 3;
+static constexpr int COL_MOTION_GRID      = 1 << COL_MOTION_GRID_LOG2;
+static_assert( COL_MOTION_GRID == 4 * std::max<int>( 1, 4 * AMVP_DECIMATION_FACTOR / 4 ), "The grid must match CU::getColocatedMVP" );
+
+void CodingStructure::compressMotionBuf()
+{
+  CHECK( !m_motionBuf || m_motionBufCompressed, "Only a full motion field can be compressed" );
+
+  const unsigned stride       = g_miScaling.scaleHor( area.lumaSize().width );
+  const int      widthOnGrid  = ( area.lwidth()  + COL_MOTION_GRID - 1 ) >> COL_MOTION_GRID_LOG2;
+  const int      heightOnGrid = ( area.lheight() + COL_MOTION_GRID - 1 ) >> COL_MOTION_GRID_LOG2;
+
+  m_motionBufCompressed = new MotionInfo[widthOnGrid * heightOnGrid];
+  for( int y = 0; y < heightOnGrid; y++ )
+  {
+    for( int x = 0; x < widthOnGrid; x++ )
+    {
+      const Position miPos = g_miScaling.scale( Position( x << COL_MOTION_GRID_LOG2, y << COL_MOTION_GRID_LOG2 ) );
+      m_motionBufCompressed[y * widthOnGrid + x] = m_motionBuf[miPos.y * stride + miPos.x];
+    }
+  }
+
+  delete[] m_motionBuf;
+  m_motionBuf = nullptr;
+}
+
+const MotionInfo& CodingStructure::getColocatedMotionInfo( const Position& pos ) const
+{
+  if( !m_motionBufCompressed )
+  {
+    return getMotionInfo( pos );
+  }
+
+  CHECKD( !area.Y().contains( pos ), "Trying to access motion information outside of this coding structure" );
+  CHECKD( ( pos.x | pos.y ) & ( COL_MOTION_GRID - 1 ), "Colocated motion is read on the grid only" );
+
+  const int      widthOnGrid = ( area.lwidth() + COL_MOTION_GRID - 1 ) >> COL_MOTION_GRID_LOG2;
+  const Position offset      = pos - area.lumaPos();
+  return m_motionBufCompressed[( offset.y >> COL_MOTION_GRID_LOG2 ) * widthOnGrid + ( offset.x >> COL_MOTION_GRID_LOG2 )];
 }
 
 void CodingStructure::destroyCoeffs()
