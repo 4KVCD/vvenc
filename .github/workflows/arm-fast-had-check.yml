@@ -1,0 +1,74 @@
+# Temporary checks for the generic DF_HAD_fast fix on Arm, run only on this fork's arm-fast-check* branches (not part
+# of the pull request): RdCost unit tests and bitstreams of SIMD against SCALAR, master against this branch.
+name: Arm generic fast Hadamard check
+
+on:
+  push:
+    branches: [arm-fast-check*]
+
+jobs:
+  check:
+    name: "master against this branch (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build master and this branch
+        shell: bash
+        run: |
+          git worktree add ../master b401ac9
+          for v in master fix; do
+            src=.; [ $v = master ] && src=../master
+            cmake -S $src -B ../build-$v -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > ../cmake-$v.log
+            grep "SVE2 intrinsics" ../cmake-$v.log
+            cmake --build ../build-$v --target vvencapp vvenc_unit_test > /dev/null
+          done
+      - name: RdCost unit tests
+        shell: bash
+        run: |
+          for v in master fix; do
+            for simd in NEON SVE2; do
+              ../build-$v/bin/vvenc_unit_test --SIMD=$simd --testcase=RdCost --seed=1 > ut.log && result=pass || result=FAIL
+              echo "$v $simd: $result, $(grep -c 'failed:' ut.log || true) failed checks:" \
+                   "$(grep 'failed:' ut.log | sed 's/.*DistortFunc\[0\]//' | sort -u | head -8 | tr '\n' ' ')"
+            done
+          done
+      - name: Make a test clip
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          # 416x240 8-bit 4:2:0, 9 frames: moving gradients, blocks and noise, so the encoder tests many block sizes
+          import random
+          random.seed( 7 )
+          w, h = 416, 240
+          with open( "clip.yuv", "wb" ) as f:
+            for t in range( 9 ):
+              y = bytearray( w * h )
+              for r in range( h ):
+                for c in range( w ):
+                  v = ( 2 * c + 3 * r + 4 * t ) % 256
+                  if ( ( c + 3 * t ) // 48 + r // 40 ) % 3 == 0:
+                    v = ( v * 3 + 50 ) % 256
+                  y[r * w + c] = max( 0, min( 255, v + random.randint( -6, 6 ) ) )
+              uv = bytearray( ( ( c * 7 + r * 5 + 9 * t ) % 256 ) for r in range( h // 2 ) for c in range( w // 2 ) )
+              f.write( y ); f.write( uv ); f.write( uv )
+          EOF
+          ls -l clip.yuv
+      - name: Bitstreams, SIMD against SCALAR
+        shell: bash
+        run: |
+          for preset in faster fast; do
+            for v in master fix; do
+              line="$preset $v:"
+              for simd in SCALAR NEON SVE2; do
+                ../build-$v/bin/vvencapp -i clip.yuv -s 416x240 -r 30 -c yuv420 --preset $preset -f 9 --threads 1 \
+                  --SIMD $simd -o out.266 > /dev/null
+                line="$line $simd $(md5sum < out.266 | cut -c1-12)"
+              done
+              echo "$line"
+            done
+          done
