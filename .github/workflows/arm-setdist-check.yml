@@ -1,0 +1,52 @@
+# Temporary check for the setDistParam change on top of #733, run only on this fork's setdist-check* branches:
+# RdCost unit tests and bitstreams before (043593e) and after, at SCALAR, NEON and SVE2.
+name: Arm setDistParam check
+
+on:
+  push:
+    branches: [setdist-check*]
+
+jobs:
+  check:
+    name: "043593e against this branch (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          git worktree add ../before 043593e
+          for v in before after; do
+            src=../$v; [ $v = after ] && src=.
+            cmake -S $src -B ../build-$v -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null
+            cmake --build ../build-$v --target vvencFFapp vvenc_unit_test > /dev/null
+          done
+      - name: RdCost unit tests
+        shell: bash
+        run: |
+          status=0
+          for simd in NEON SVE2; do
+            ../build-after/bin/vvenc_unit_test --SIMD=$simd --testcase=RdCost --seed=1 > ut.log 2> ut.err || status=1
+            echo "$simd: $(tail -2 ut.log | head -1) $(grep -c 'failed:' ut.err || true) failed"
+          done
+          exit $status
+      - name: Bitstreams
+        shell: bash
+        run: |
+          python3 .github/setdist-check/make_clip.py
+          for preset in faster fast medium slow; do
+            for simd in SCALAR NEON SVE2; do
+              for v in before after; do
+                ../build-$v/bin/vvencFFapp -c cfg/randomaccess_$preset.cfg -i clip.yuv --SourceWidth=416 --SourceHeight=240 \
+                  --FrameRate=30 --InputBitDepth=8 -f 9 --Threads=1 --SIMD=$simd -b out_$v.266 > /dev/null
+              done
+              a=$(md5sum < out_before.266 | cut -c1-12); b=$(md5sum < out_after.266 | cut -c1-12)
+              result=IDENTICAL; [ $a != $b ] && result=DIFFERENT
+              echo "RESULT $preset $simd: $result (before $a, after $b)"
+            done
+          done
