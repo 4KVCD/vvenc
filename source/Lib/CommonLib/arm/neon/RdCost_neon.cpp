@@ -773,6 +773,8 @@ Distortion xCalcHAD4x4_neon( const Pel* piOrg, const Pel* piCur, const ptrdiff_t
   return sad;
 }
 
+// With fastHad, square blocks of 32x32 and larger use the subsampled 16x16 transform, like RdCost::xGetHADs<true>.
+template<bool fastHad>
 Distortion xGetHADs_generic_neon( const DistParam& rcDtParam )
 {
   const Pel* piOrg = rcDtParam.org.buf;
@@ -828,6 +830,19 @@ Distortion xGetHADs_generic_neon( const DistParam& rcDtParam )
       piOrg += 8 * iStrideOrg;
       piCur += 8 * iStrideCur;
       iRows -= 8;
+    } while( iRows != 0 );
+  }
+  else if( fastHad && iCols % 32 == 0 && iRows == iCols )
+  {
+    do
+    {
+      for( int x = 0; x < iCols; x += 16 )
+      {
+        uiSum += xCalcHAD16x16_fast_neon( &piOrg[x], &piCur[x], iStrideOrg, iStrideCur );
+      }
+      piOrg += 16 * iStrideOrg;
+      piCur += 16 * iStrideCur;
+      iRows -= 16;
     } while( iRows != 0 );
   }
   else if( iCols % 8 == 0 && iRows == iCols )
@@ -1281,7 +1296,7 @@ static inline Distortion xGetSAD_generic_neon( const DistParam& rcDtParam, const
 
 Distortion xGetHAD2SADs_neon( const DistParam& rcDtParam )
 {
-  Distortion distHad = xGetHADs_generic_neon( rcDtParam );
+  Distortion distHad = xGetHADs_generic_neon<false>( rcDtParam );
   Distortion distSad = xGetSAD_generic_neon( rcDtParam, rcDtParam.org.width );
 
   return std::min( distHad, 2 * distSad );
@@ -1591,7 +1606,7 @@ void RdCost::_initRdCostARM<NEON>()
   m_afpDistortFunc[0][DF_SAD_WITH_MASK] = xGetSADwMask_neon;
   m_afpDistortFunc[0][DF_HAD_2SAD ] = xGetHAD2SADs_neon;
 
-  m_afpDistortFunc[0][DF_HAD] = xGetHADs_generic_neon;
+  m_afpDistortFunc[0][DF_HAD] = xGetHADs_generic_neon<false>;
   m_afpDistortFunc[0][DF_HAD2] = xGetHADs_neon<2>;
   m_afpDistortFunc[0][DF_HAD4] = xGetHADs_neon<4>;
   m_afpDistortFunc[0][DF_HAD8] = xGetHADs_neon<8>;
@@ -1600,7 +1615,7 @@ void RdCost::_initRdCostARM<NEON>()
   m_afpDistortFunc[0][DF_HAD64] = xGetHADs_neon<64>;
   m_afpDistortFunc[0][DF_HAD128] = xGetHADs_neon<128>;
 
-  m_afpDistortFunc[0][DF_HAD_fast] = xGetHADs_generic_neon;
+  m_afpDistortFunc[0][DF_HAD_fast] = xGetHADs_generic_neon<true>;
   m_afpDistortFunc[0][DF_HAD2_fast] = xGetHADs_neon<2>;
   m_afpDistortFunc[0][DF_HAD4_fast] = xGetHADs_neon<4>;
   m_afpDistortFunc[0][DF_HAD8_fast] = xGetHADs_neon<8>;
