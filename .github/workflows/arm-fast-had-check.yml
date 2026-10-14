@@ -20,12 +20,14 @@ jobs:
         shell: bash
         run: |
           git worktree add ../master b401ac9
+          # master's code with this branch's unit test, which also checks the generic DF_HAD and DF_HAD_fast entries
+          cp test/vvenc_unit_test/vvenc_unit_test.cpp ../master/test/vvenc_unit_test/
           for v in master fix; do
             src=.; [ $v = master ] && src=../master
             cmake -S $src -B ../build-$v -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
                   -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > ../cmake-$v.log
             grep "SVE2 intrinsics" ../cmake-$v.log
-            cmake --build ../build-$v --target vvencapp vvenc_unit_test > /dev/null
+            cmake --build ../build-$v --target vvencFFapp vvenc_unit_test > /dev/null
           done
       - name: RdCost unit tests
         shell: bash
@@ -65,8 +67,8 @@ jobs:
             for v in master fix; do
               line="$preset $v:"
               for simd in SCALAR NEON SVE2; do
-                ../build-$v/bin/vvencapp -i clip.yuv -s 416x240 -r 30 -c yuv420 --preset $preset -f 9 --threads 1 \
-                  --SIMD $simd -o out.266 > /dev/null
+                ../build-$v/bin/vvencFFapp -c cfg/randomaccess_$preset.cfg -i clip.yuv --SourceWidth=416 \
+                  --SourceHeight=240 --FrameRate=30 --InputBitDepth=8 -f 9 --Threads=1 --SIMD=$simd -b out.266 > /dev/null
                 line="$line $simd $(md5sum < out.266 | cut -c1-12)"
               done
               echo "$line"
