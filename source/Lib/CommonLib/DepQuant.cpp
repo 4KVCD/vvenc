@@ -46,6 +46,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "UnitTools.h"
 
 #include <bitset>
+#include <memory>
+#include <mutex>
 
 //! \ingroup CommonLib
 //! \{
@@ -1418,20 +1420,30 @@ void DepQuant::xDequantDQ( const TransformUnit& tu,  CoeffBuf& recCoeff, const C
   m_quant.dequantBlock( tu, compID, cQP, recCoeff, enableScalingLists, piDequantCoef );
 }
 
+// The scan tables depend on nothing but the block sizes, so all quantizers share one copy instead of
+// building about 1 MB of tables per worker thread. The copy lives while any quantizer uses it.
+static std::shared_ptr<DQIntern::Rom> getSharedScansRom()
+{
+  static std::mutex                   mutex;
+  static std::weak_ptr<DQIntern::Rom> shared;
+
+  std::lock_guard<std::mutex> lock( mutex );
+  std::shared_ptr<DQIntern::Rom> rom = shared.lock();
+  if( !rom )
+  {
+    rom = std::make_shared<DQIntern::Rom>();
+    rom->init();
+    shared = rom;
+  }
+  return rom;
+}
+
 DepQuant::DepQuant( const Quant* other, bool enc, bool useScalingLists, bool enableOpt ) : QuantRDOQ2( other, useScalingLists ), RateEstimator(), m_commonCtx()
 {
   const DepQuant* dq = dynamic_cast<const DepQuant*>( other );
   CHECK( other && !dq, "The DepQuant cast must be successfull!" );
 
-  if( !dq )
-  {
-    m_scansRom = std::make_shared<DQIntern::Rom>();
-    m_scansRom->init();
-  }
-  else
-  {
-    m_scansRom = dq->m_scansRom;
-  }
+  m_scansRom = dq ? dq->m_scansRom : getSharedScansRom();
 
   for( int t = 0; t < ( MAX_TB_SIZEY * MAX_TB_SIZEY ); t++ )
   {
