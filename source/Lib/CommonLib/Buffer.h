@@ -54,8 +54,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "MotionInfo.h"
 
 #include <string.h>
+#include <memory>
 #include <type_traits>
 #include <typeinfo>
+#include <vector>
 
 #include "vvenc/vvenc.h"
 
@@ -996,6 +998,35 @@ private:
 
   UnitArea m_maxArea;
   Pel* m_origin[MAX_NUM_COMP];
+};
+
+/// Holds a PelStorage losslessly in 10 bits per sample instead of 16, which takes 62.5% of the memory.
+/// Every sample keeps its upper 8 bits in one byte, and the lower 2 bits of four samples share a byte.
+/// Only storages whose samples all lie in [0, 1023], margins included, can be packed.
+class PackedPelStorage
+{
+public:
+  /// Packs src, created with the given margin at position (0,0), and frees it. Returns false and
+  /// leaves src as it is when a sample does not fit in 10 bits.
+  bool pack( PelStorage& src, const unsigned margin );
+  /// Creates dst again with the samples src had and frees the packed form.
+  void unpack( PelStorage& dst );
+  bool isPacked() const { return !m_planes.empty(); }
+  void clear()          { m_planes.clear(); }
+
+private:
+  struct Plane
+  {
+    std::unique_ptr<uint8_t[]> high;            ///< upper 8 bits of every sample
+    std::unique_ptr<uint8_t[]> low;             ///< lower 2 bits of the samples k, k+q, k+2q and k+3q in byte k
+    size_t                     numSamples = 0;  ///< samples in the allocation, margins included
+    int                        stride     = 0;
+  };
+
+  ChromaFormat       m_chromaFormat = NUM_CHROMA_FORMAT;
+  Area               m_area;
+  unsigned           m_margin       = 0;
+  std::vector<Plane> m_planes;
 };
 
 struct CompStorage : public PelBuf

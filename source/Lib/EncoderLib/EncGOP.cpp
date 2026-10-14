@@ -58,6 +58,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "GOPCfg.h"
 
 #include <list>
+#include <map>
+#include <set>
 
 //! \ingroup EncoderLib
 //! \{
@@ -180,6 +182,10 @@ void EncGOP::init( const VVEncCfg& encCfg, const GOPCfg* gopCfg, RateCtrl& rateC
   m_pcRateCtrl    = &rateCtrl;
   m_threadPool    = threadPool;
   m_isPreAnalysis = isPreAnalysis;
+  if( ! isPreAnalysis )
+  {
+    m_framePacker.reset( new FramePacker() );
+  }
 
   // setup parameter sets
   const int dciId = m_pcEncCfg->m_decodingParameterSetEnabled ? 1 : 0;
@@ -344,6 +350,12 @@ void EncGOP::processPictures( const PicList& picList, AccessUnitList& auList, Pi
 
   // shrink the motion fields of encoded pictures that later pictures still read
   xCompressReferenceMotion( picList );
+
+  // keep the input frames that no picture reads now in packed form
+  if( ! m_isPreAnalysis )
+  {
+    xPackIdleFrames( picList, freeList );
+  }
 
   // clear output access unit
   if( m_isPreAnalysis )
@@ -515,7 +527,8 @@ void EncGOP::xProcessPictures( AccessUnitList& auList, PicList& doneList )
 
   if( ! m_isPreAnalysis )
   {
-    outPic->getFilteredOrigBuffer().destroy();
+    m_framePacker->forget( outPic->m_picShared );
+    outPic->m_picShared->releaseFilteredFrame();
   }
 
   doneList.push_back( outPic );
@@ -593,6 +606,19 @@ void EncGOP::xSyncAlfAps( Picture& pic )
 
 void EncGOP::xEncodePicture( Picture* pic, EncPicture* picEncoder )
 {
+  // the picture reads its own frames and, for QPA, the input frames of its previous pictures
+  if( m_framePacker )
+  {
+    m_framePacker->unpack( pic->m_picShared );
+    for( int i = 0; i < NUM_QPA_PREV_FRAMES; i++ )
+    {
+      if( pic->m_bufsOrigPrev[ i ] )
+      {
+        m_framePacker->unpack( pic->m_picShared->m_prevShared[ i ] );
+      }
+    }
+  }
+
   // first pass temporal down-sampling
   if( ( ! m_pcRateCtrl->rcIsFinalPass || m_isPreAnalysis ) && pic->gopEntry->m_skipFirstPass )
   {
@@ -734,9 +760,41 @@ void EncGOP::xReleasePictures( const PicList& picList, PicList& freeList )
       // Nothing reads a released picture any more. Its buffers are allocated again when the
       // picture object is reused and its next picture starts encoding.
       pic->releaseEncodingBuffers();
+      if( m_framePacker )
+      {
+        m_framePacker->forget( pic->m_picShared );
+      }
       freeList.push_back( pic );
     }
   }
+}
+
+// A picture gets its motion field when its encoding starts (Picture::createEncodingBuffers) and keeps
+// it until the picture is released, so the motion field shows whether its encoding has started.
+static bool isEncodingStarted( const Picture* pic )
+{
+  return pic->cs && pic->cs->hasMotionBuf();
+}
+
+// Whether every reference picture of the picture is reconstructed or being encoded, so that the
+// picture can start as soon as those encodes end.
+static bool areReferencesUnderWay( const Picture& pic )
+{
+  for( const Slice* slice : pic.slices )
+  {
+    for( int list = 0; list < NUM_REF_PIC_LIST_01; list++ )
+    {
+      for( int i = 0; i < slice->numRefIdx[ list ]; i++ )
+      {
+        const Picture* ref = slice->refPicList[ list ][ i ];
+        if( ! ref->isReconstructed && ! isEncodingStarted( ref ) )
+        {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 static bool isReferencedBy( const Picture& pic, const Picture& ref )
@@ -759,14 +817,13 @@ static bool isReferencedBy( const Picture& pic, const Picture& ref )
 
 void EncGOP::xCompressReferenceMotion( const PicList& picList )
 {
-  // A picture gets its motion field when its encoding starts, so a picture that has one but is not
-  // reconstructed yet is being encoded. Its tasks may be reading the motion fields of its reference
+  // The tasks of a picture that is being encoded may be reading the motion fields of its reference
   // pictures right now, so those stay as they are until it is reconstructed. Pictures start
   // encoding only on this thread, so no picture starts while this runs.
   std::vector<const Picture*> beingEncoded;
   for( const Picture* pic : picList )
   {
-    if( pic->cs && pic->cs->hasMotionBuf() && !pic->isReconstructed )
+    if( isEncodingStarted( pic ) && !pic->isReconstructed )
     {
       beingEncoded.push_back( pic );
     }
@@ -784,6 +841,241 @@ void EncGOP::xCompressReferenceMotion( const PicList& picList )
     if( !isReadNow )
     {
       pic->cs->compressMotionBuf();
+    }
+  }
+}
+
+// A picture links the input frames of its previous pictures for QPA, which reads them while the
+// picture is encoded. Collects the frames that pictures being encoded read now, and counts for every
+// linked frame the links of pictures that do not read it now: those still waiting and those that are
+// reconstructed already.
+static void collectQpaLinks( const PicList& picList, std::set<const PicShared*>& readNow, std::map<const PicShared*, int>& idleLinks )
+{
+  for( const Picture* pic : picList )
+  {
+    const bool isReading = isEncodingStarted( pic ) && ! pic->isReconstructed;
+    for( int i = 0; i < NUM_QPA_PREV_FRAMES; i++ )
+    {
+      if( pic->m_bufsOrigPrev[ i ] )
+      {
+        const PicShared* prevShared = pic->m_picShared->m_prevShared[ i ];
+        if( isReading )
+        {
+          readNow.insert( prevShared );
+        }
+        else
+        {
+          idleLinks[ prevShared ] += 1;
+        }
+      }
+    }
+  }
+}
+
+// The pictures that start encoding soon read their frames, and those of their previous pictures:
+// the next ones in coding order, and the queued ones whose reference pictures are reconstructed or
+// being encoded, because a picture encoder that becomes free starts the first one whose references
+// are done. The packer unpacks these frames ahead of time, so that starting a picture does not wait
+// for it. Returns the frames.
+std::set<const PicShared*> EncGOP::xPrefetchFramesOfNextPictures()
+{
+  std::set<const PicShared*> readSoon;
+  const int numNext      = std::max( 1, m_pcEncCfg->m_maxParallelFrames );
+  int       numUnstarted = 0;
+  for( const std::list<Picture*>* list : { &m_procList, &m_gopEncListInput } )
+  {
+    for( const Picture* pic : *list )
+    {
+      if( isEncodingStarted( pic ) || pic->isReconstructed )
+      {
+        continue;
+      }
+      const bool isNext = numUnstarted++ < numNext;
+      if( ! isNext && ( list != &m_procList || ! areReferencesUnderWay( *pic ) ) )
+      {
+        continue;
+      }
+      readSoon.insert( pic->m_picShared );
+      m_framePacker->prefetch( pic->m_picShared );
+      for( int i = 0; i < NUM_QPA_PREV_FRAMES; i++ )
+      {
+        if( pic->m_bufsOrigPrev[ i ] )
+        {
+          readSoon.insert( pic->m_picShared->m_prevShared[ i ] );
+          m_framePacker->prefetch( pic->m_picShared->m_prevShared[ i ] );
+        }
+      }
+    }
+  }
+  return readSoon;
+}
+
+void EncGOP::xPackIdleFrames( const PicList& picList, const PicList& freeList )
+{
+  std::set<const PicShared*>      readNow;
+  std::map<const PicShared*, int> idleLinks;
+  collectQpaLinks( picList, readNow, idleLinks );
+  const std::set<const PicShared*> readSoon = xPrefetchFramesOfNextPictures();
+
+  // The frames of a picture that is not being encoded, because it waits or is reconstructed already,
+  // can be packed when no picture reads them now or soon and nobody outside this stage uses them:
+  // every user other than the picture itself is an idle link from here. Frames unpacked for a reader
+  // are packed again once it is done. Pictures released in this round are left alone, because their
+  // frames may be reused for new input right away.
+  for( Picture* pic : picList )
+  {
+    PicShared* picShared = pic->m_picShared;
+    const bool isBeingEncoded = isEncodingStarted( pic ) && ! pic->isReconstructed;
+    const bool isReleased     = std::find( freeList.begin(), freeList.end(), pic ) != freeList.end();
+    if( isBeingEncoded || isReleased || readNow.count( picShared ) || readSoon.count( picShared ) )
+    {
+      continue;
+    }
+    if( picShared->numUsers() == 1 + idleLinks[ picShared ] )
+    {
+      m_framePacker->pack( picShared );
+    }
+  }
+}
+
+FramePacker::FramePacker()
+  : m_stop  ( false )
+  , m_thread( &FramePacker::xRun, this )
+{
+}
+
+FramePacker::~FramePacker()
+{
+  {
+    std::lock_guard<std::mutex> lock( m_mutex );
+    m_stop = true;
+  }
+  m_workArrived.notify_one();
+  m_thread.join();
+  for( PicShared* picShared : m_queue )
+  {
+    picShared->m_packQueued = false;
+  }
+}
+
+// Queues the frames unless they are queued or converted already; the thread converting them looks at
+// what is wanted again when it is done. Callers hold m_mutex.
+void FramePacker::xQueue( PicShared* picShared, const bool urgent )
+{
+  if( picShared->m_packQueued || picShared->m_packBusy )
+  {
+    return;
+  }
+  picShared->m_packQueued = true;
+  if( urgent )
+  {
+    m_queue.push_front( picShared );
+  }
+  else
+  {
+    m_queue.push_back( picShared );
+  }
+  m_workArrived.notify_one();
+}
+
+void FramePacker::pack( PicShared* picShared )
+{
+  std::lock_guard<std::mutex> lock( m_mutex );
+  picShared->m_packWanted = true;
+  if( ! picShared->m_packBusy && picShared->hasPackableFrames() )
+  {
+    xQueue( picShared, false );
+  }
+}
+
+void FramePacker::prefetch( PicShared* picShared )
+{
+  std::lock_guard<std::mutex> lock( m_mutex );
+  picShared->m_packWanted = false;
+  if( ! picShared->m_packBusy && picShared->isPacked() )
+  {
+    xQueue( picShared, true );
+  }
+}
+
+// Takes the frames out of the queue, if they wait there. Callers hold m_mutex.
+void FramePacker::xUnqueue( PicShared* picShared )
+{
+  if( picShared->m_packQueued )
+  {
+    m_queue.erase( std::find( m_queue.begin(), m_queue.end(), picShared ) );
+    picShared->m_packQueued = false;
+  }
+}
+
+void FramePacker::unpack( PicShared* picShared )
+{
+  std::unique_lock<std::mutex> lock( m_mutex );
+  picShared->m_packWanted = false;
+  m_workDone.wait( lock, [picShared] { return ! picShared->m_packBusy; } );
+  xUnqueue( picShared );
+  if( picShared->isPacked() )
+  {
+    // unpacking here is faster than waiting for the frames' turn in the queue
+    picShared->m_packBusy = true;
+    lock.unlock();
+    picShared->unpackFrames();
+    lock.lock();
+    picShared->m_packBusy = false;
+    m_workDone.notify_all();
+  }
+}
+
+void FramePacker::forget( PicShared* picShared )
+{
+  std::unique_lock<std::mutex> lock( m_mutex );
+  m_workDone.wait( lock, [picShared] { return ! picShared->m_packBusy; } );
+  xUnqueue( picShared );
+  picShared->m_packWanted = false;
+}
+
+void FramePacker::xRun()
+{
+  std::unique_lock<std::mutex> lock( m_mutex );
+  while( true )
+  {
+    m_workArrived.wait( lock, [this] { return m_stop || ! m_queue.empty(); } );
+    if( m_stop )
+    {
+      return;
+    }
+    PicShared* picShared = m_queue.front();
+    m_queue.pop_front();
+    picShared->m_packQueued = false;
+
+    // The stage thread may be unpacking the frames itself (see unpack); then there is nothing to do.
+    if( picShared->m_packBusy )
+    {
+      continue;
+    }
+    const bool toPack = picShared->m_packWanted;
+    if( toPack ? ! picShared->hasPackableFrames() : ! picShared->isPacked() )
+    {
+      continue;
+    }
+    picShared->m_packBusy = true;
+    lock.unlock();
+    if( toPack )
+    {
+      picShared->packFrames();
+    }
+    else
+    {
+      picShared->unpackFrames();
+    }
+    lock.lock();
+    picShared->m_packBusy = false;
+    m_workDone.notify_all();
+
+    // the stage thread may have asked for the frames while they were being packed
+    if( ! picShared->m_packWanted && picShared->isPacked() )
+    {
+      xQueue( picShared, true );
     }
   }
 }

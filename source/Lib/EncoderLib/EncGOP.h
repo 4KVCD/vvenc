@@ -60,6 +60,10 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <vector>
 #include <list>
+#include <deque>
+#include <memory>
+#include <set>
+#include <thread>
 #include <stdlib.h>
 #include <atomic>
 
@@ -106,6 +110,33 @@ struct RateCapParam {
     accumTargetBits = 0;
     accumGopCounter = 0;
   }
+};
+
+/// Packs and unpacks the input frames of the GOP stage on a helper thread, so that the thread that runs
+/// the encoder stages and starts pictures does not spend its time on it. That thread alone decides
+/// which frames may be packed, and it calls unpack() before anything reads a frame.
+class FramePacker
+{
+public:
+  FramePacker();
+  ~FramePacker();
+
+  void pack    ( PicShared* picShared );  ///< packs the frames in the background
+  void prefetch( PicShared* picShared );  ///< unpacks the frames in the background, before waiting packing work
+  void unpack  ( PicShared* picShared );  ///< returns once the frames are unpacked
+  void forget  ( PicShared* picShared );  ///< returns once no work on the frames waits or runs
+
+private:
+  void xQueue  ( PicShared* picShared, const bool urgent );
+  void xUnqueue( PicShared* picShared );
+  void xRun();
+
+  std::mutex              m_mutex;
+  std::condition_variable m_workArrived;
+  std::condition_variable m_workDone;
+  std::deque<PicShared*>  m_queue;
+  bool                    m_stop;
+  std::thread             m_thread;   ///< declared last, so it starts once the members it uses exist
 };
 
 class EncGOP : public EncStage
@@ -170,6 +201,7 @@ private:
   bool                      m_forceSCC;
 
   FGAnalyzer                m_fgAnalyzer;
+  std::unique_ptr<FramePacker> m_framePacker;      ///< packs waiting input frames, final stage only
 
 public:
   EncGOP( MsgLog& msglog );
@@ -193,6 +225,8 @@ private:
   void xOutputRecYuv                  ( const PicList& picList );
   void xReleasePictures               ( const PicList& picList, PicList& freeList );
   void xCompressReferenceMotion       ( const PicList& picList );
+  std::set<const PicShared*> xPrefetchFramesOfNextPictures();
+  void xPackIdleFrames                ( const PicList& picList, const PicList& freeList );
 
   void xInitVPS                       ( VPS &vps ) const;
   void xInitDCI                       ( DCI &dci, const SPS &sps, const int dciId ) const;

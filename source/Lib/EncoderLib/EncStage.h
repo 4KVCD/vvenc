@@ -75,6 +75,17 @@ public:
 private:
   PelStorage       m_origBuf;
   PelStorage       m_filteredBuf;
+  PackedPelStorage m_packedOrigBuf;      ///< m_origBuf while it is packed, see packFrames
+  PackedPelStorage m_packedFilteredBuf;  ///< m_filteredBuf while it is packed
+  bool             m_origPackable;       ///< false once packing failed, so the frame is not scanned again
+  bool             m_filteredPackable;
+  // Where the frames stand with the FramePacker of the GOP stage (EncGOP.h), guarded by its mutex.
+  bool             m_packWanted;         ///< whether the stage thread wants the frames packed
+  bool             m_packQueued;         ///< whether the frames wait in the packer's queue
+  bool             m_packBusy;           ///< whether a thread packs or unpacks the frames right now
+  ChromaFormat     m_chromaFormat;
+  Size             m_lumaSize;
+  int              m_padding;
   uint64_t         m_cts;
   int              m_maxFrames;
   int              m_poc;
@@ -93,6 +104,13 @@ public:
   , m_picMemorySTA   ( 0 )
   , m_picMotEstError ( 0 )
   , m_picAuxQpOffset ( 0 )
+  , m_origPackable   ( true )
+  , m_filteredPackable( true )
+  , m_packWanted     ( false )
+  , m_packQueued     ( false )
+  , m_packBusy       ( false )
+  , m_chromaFormat   ( NUM_CHROMA_FORMAT )
+  , m_padding        ( 0 )
   , m_cts            ( 0 )
   , m_maxFrames      ( -1 )
   , m_poc            ( -1 )
@@ -112,10 +130,11 @@ public:
   bool         isUsed()          const { return m_refCount > 0; }
   void         incUsed()               { m_refCount += 1; }
   void         decUsed()               { CHECK( m_refCount <= 0, "invalid state: release unused picture" ); if( m_refCount > 0 ) m_refCount -= 1; }
+  int          numUsers()        const { return m_refCount; }
   bool         isLeadTrail()     const { return m_isLead || m_isTrail; }
   int          getPOC()          const { return m_poc; }
-  ChromaFormat getChromaFormat() const { return m_origBuf.chromaFormat; }
-  Size         getLumaSize()     const { return m_origBuf.Y(); }
+  ChromaFormat getChromaFormat() const { return m_chromaFormat; }
+  Size         getLumaSize()     const { return m_lumaSize; }
 
   void create( int maxFrames, ChromaFormat chromaFormat, const Size& size, bool useFilter )
   {
@@ -124,8 +143,10 @@ public:
     m_maxFrames = maxFrames;
     m_refCount  = 0;
 
-    const int padding = useFilter ? MCTF_FRAME_MARGIN : 0;
-    m_origBuf.create( chromaFormat, Area( Position(), size ), 0, padding );
+    m_chromaFormat = chromaFormat;
+    m_lumaSize     = size;
+    m_padding      = useFilter ? MCTF_FRAME_MARGIN : 0;
+    m_origBuf.create( chromaFormat, Area( Position(), size ), 0, m_padding );
   }
 
   void reuse( int poc, const vvencYUVBuffer* yuvInBuf )
@@ -133,6 +154,17 @@ public:
     CHECK( m_refCount < 0, "PicShared not created" );
     CHECK( isUsed(),       "PicShared still in use" );
 
+    // a frame that was still packed when its pictures were released is not needed any more
+    CHECK( m_packQueued || m_packBusy, "PicShared reused while its frames are packed or unpacked" );
+    m_packWanted = false;
+    m_packedOrigBuf.clear();
+    m_packedFilteredBuf.clear();
+    m_origPackable     = true;
+    m_filteredPackable = true;
+    if( ! m_origBuf.valid() )
+    {
+      m_origBuf.create( m_chromaFormat, Area( Position(), m_lumaSize ), 0, m_padding );
+    }
     copyPadToPelUnitBuf( m_origBuf, *yuvInBuf, getChromaFormat() );
 
     m_picVA.reset();
@@ -156,6 +188,44 @@ public:
     m_userData       = yuvInBuf->userData;
 #endif
   }
+
+  bool isPacked() const          { return m_packedOrigBuf.isPacked() || m_packedFilteredBuf.isPacked(); }
+  bool hasPackableFrames() const { return ( m_origPackable && m_origBuf.valid() ) || ( m_filteredPackable && m_filteredBuf.valid() ); }
+
+  // Packs the input frame and the MCTF-filtered frame, if there is one, to 10 bits per sample. The
+  // FramePacker of the GOP stage calls this when nothing can read the frames before they are unpacked.
+  void packFrames()
+  {
+    if( m_origPackable && m_origBuf.valid() )
+    {
+      m_origPackable = m_packedOrigBuf.pack( m_origBuf, m_padding );
+    }
+    if( m_filteredPackable && m_filteredBuf.valid() )
+    {
+      m_filteredPackable = m_packedFilteredBuf.pack( m_filteredBuf, MCTF_FRAME_MARGIN );
+    }
+  }
+
+  // The final GOP stage drops the filtered frame, packed or not, once the picture is written.
+  void releaseFilteredFrame()
+  {
+    m_filteredBuf.destroy();
+    m_packedFilteredBuf.clear();
+  }
+
+  void unpackFrames()
+  {
+    if( m_packedOrigBuf.isPacked() )
+    {
+      m_packedOrigBuf.unpack( m_origBuf );
+    }
+    if( m_packedFilteredBuf.isPacked() )
+    {
+      m_packedFilteredBuf.unpack( m_filteredBuf );
+    }
+  }
+
+  friend class FramePacker;
 
   void shareData( Picture* pic )
   {

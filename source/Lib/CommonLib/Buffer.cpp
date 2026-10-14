@@ -1229,6 +1229,122 @@ void downsampleYuv(PelBuf& dest, const vvencYUVPlane& yuvPlaneIn, int downsample
   }
 }
 
+// A packed plane keeps the upper 8 bits of every sample in high, and the lower 2 bits by quarters in
+// low: byte k holds the samples k, k+q, k+2q and k+3q, with q a quarter of the samples. Each loop
+// below then walks whole arrays element by element, so that compilers can turn it into vector code.
+// The arrays never overlap, and the pointers say so (__restrict), because compilers that cannot prove
+// it themselves, like MSVC, would otherwise leave the loops scalar.
+static size_t packedQuarter( const size_t numSamples )
+{
+  return ( numSamples + 3 ) >> 2;
+}
+
+// Stores the upper 8 bits of every sample and returns all samples OR-ed together: a sample that does
+// not fit in 10 bits sets a bit above the tenth.
+static unsigned storeUpperBits( const Pel* __restrict samples, uint8_t* __restrict high, const size_t numSamples )
+{
+  unsigned allBits = 0;
+  for( size_t k = 0; k < numSamples; k++ )
+  {
+    allBits |= uint16_t( samples[k] );
+    high[k]  = uint8_t( uint16_t( samples[k] ) >> 2 );
+  }
+  return allBits;
+}
+
+// Stores the lower 2 bits of the samples of one quarter at bit 2 * Quarter of their bytes in low. The
+// first quarter writes every byte, so low needs no zero fill. The bits move by a multiplication with
+// a constant, because MSVC does not vectorize a shift that narrows to bytes.
+template<int Quarter>
+static void storeQuarter( const Pel* __restrict samples, uint8_t* __restrict low, const size_t numSamples )
+{
+  constexpr int scale   = 1 << ( 2 * Quarter );
+  const size_t  quarter = packedQuarter( numSamples );
+  const size_t  begin   = std::min( Quarter * quarter, numSamples );
+  const size_t  count   = std::min( quarter, numSamples - begin );
+  for( size_t k = 0; k < count; k++ )
+  {
+    const uint8_t bits = uint8_t( ( samples[begin + k] & 3 ) * scale );
+    low[k] = Quarter == 0 ? bits : uint8_t( low[k] | bits );
+  }
+}
+
+// Rebuilds the samples of one quarter from their upper and lower bits, writing each sample once.
+template<int Quarter>
+static void loadQuarter( const uint8_t* __restrict high, const uint8_t* __restrict low, Pel* __restrict samples, const size_t numSamples )
+{
+  const size_t quarter = packedQuarter( numSamples );
+  const size_t begin   = std::min( Quarter * quarter, numSamples );
+  const size_t count   = std::min( quarter, numSamples - begin );
+  for( size_t k = 0; k < count; k++ )
+  {
+    samples[begin + k] = Pel( ( high[begin + k] << 2 ) | ( ( low[k] >> ( 2 * Quarter ) ) & 3 ) );
+  }
+}
+
+static void storeLowerBits( const Pel* samples, uint8_t* low, const size_t numSamples )
+{
+  storeQuarter<0>( samples, low, numSamples );
+  storeQuarter<1>( samples, low, numSamples );
+  storeQuarter<2>( samples, low, numSamples );
+  storeQuarter<3>( samples, low, numSamples );
+}
+
+static void loadSamples( const uint8_t* high, const uint8_t* low, Pel* samples, const size_t numSamples )
+{
+  loadQuarter<0>( high, low, samples, numSamples );
+  loadQuarter<1>( high, low, samples, numSamples );
+  loadQuarter<2>( high, low, samples, numSamples );
+  loadQuarter<3>( high, low, samples, numSamples );
+}
+
+bool PackedPelStorage::pack( PelStorage& src, const unsigned margin )
+{
+  CHECK( isPacked(), "The storage holds packed samples already" );
+
+  std::vector<Plane> planes( getNumberValidComponents( src.chromaFormat ) );
+  for( size_t c = 0; c < planes.size(); c++ )
+  {
+    const ComponentID compID  = ComponentID( c );
+    const PelBuf      buf     = src.get( compID );
+    const Pel*        samples = src.getOrigin( compID );
+    Plane&            plane   = planes[c];
+
+    plane.stride     = buf.stride;
+    plane.numSamples = size_t( buf.stride ) * ( buf.height + 2 * ( margin >> getComponentScaleY( compID, src.chromaFormat ) ) );
+    plane.high.reset( new uint8_t[plane.numSamples] );
+    if( storeUpperBits( samples, plane.high.get(), plane.numSamples ) >> 10 )
+    {
+      return false;
+    }
+    plane.low.reset( new uint8_t[packedQuarter( plane.numSamples )] );
+    storeLowerBits( samples, plane.low.get(), plane.numSamples );
+  }
+
+  m_chromaFormat = src.chromaFormat;
+  m_area         = Area( 0, 0, src.get( COMP_Y ).width, src.get( COMP_Y ).height );
+  m_margin       = margin;
+  m_planes       = std::move( planes );
+  src.destroy();
+  return true;
+}
+
+void PackedPelStorage::unpack( PelStorage& dst )
+{
+  CHECK( !isPacked(), "The storage holds no packed samples" );
+
+  dst.create( m_chromaFormat, m_area, 0, m_margin );
+  for( size_t c = 0; c < m_planes.size(); c++ )
+  {
+    const Plane& plane   = m_planes[c];
+    Pel*         samples = dst.getOrigin( ComponentID( c ) );
+    CHECK( dst.get( ComponentID( c ) ).stride != plane.stride, "The unpacked storage must have the packed layout" );
+
+    loadSamples( plane.high.get(), plane.low.get(), samples, plane.numSamples );
+  }
+  m_planes.clear();
+}
+
 void copyPadToPelUnitBuf( PelUnitBuf pelUnitBuf, const vvencYUVBuffer& yuvBuffer, const ChromaFormat& chFmt )
 {
   CHECK( pelUnitBuf.bufs.size() == 0, "pelUnitBuf not initialized" );
