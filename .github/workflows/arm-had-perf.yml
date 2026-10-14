@@ -1,0 +1,48 @@
+# Temporary speed checks for the Arm Hadamard fix, run only on this fork's neon-had-perf* branches (not part of the
+# pull request): variants of the Neon 16x8 kernel (.github/arm-had-check/vars.cpp, see make_vars.py) with GCC and Clang.
+name: Arm Hadamard perf
+
+on:
+  push:
+    branches: [neon-had-perf*]
+
+jobs:
+  variants:
+    name: "16x8 kernel variants (ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compilers
+        run: sudo apt-get update && sudo apt-get install -y g++-14 clang-18 ninja-build
+      - name: Build the library (for the C reference)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null
+          cmake --build build --target vvenc > /dev/null
+      - name: Build the variants, count their instructions
+        shell: bash
+        run: |
+          flags="-O3 -DNDEBUG -std=c++14 -DTARGET_SIMD_ARM=1 -Isource/Lib -Isource/Lib/CommonLib -Iinclude -Ibuild"
+          for c in gcc clang; do
+            cxx=g++-14; [ $c = clang ] && cxx=clang++-18
+            $cxx $flags -c .github/arm-had-check/vars.cpp -o vars_$c.o
+            $cxx vars_$c.o build/lib/libvvenc.a -lpthread -o vars_$c
+            echo "== $c"
+            for v in 0 1 2 3 4; do
+              sym=$(nm vars_$c.o | grep -o "_ZN5vvenc10had16x8_V${v}E[A-Za-z0-9_]*" | head -1)
+              objdump -d --no-show-raw-insn --disassemble=$sym vars_$c.o > ${c}_v$v.s
+              n=$(grep -cP '^\s+[0-9a-f]+:\t' ${c}_v$v.s || true)
+              sp=$(grep -cP '\[sp' ${c}_v$v.s || true)
+              echo "V$v: $n instructions, $sp of them on the stack"
+            done
+          done
+      - name: Run GCC build
+        run: taskset -c 2 ./vars_gcc 2000000
+      - name: Run Clang build
+        run: taskset -c 2 ./vars_clang 2000000
+      - name: Disassembly, GCC
+        shell: bash
+        run: for v in 0 1 2 3 4; do echo "######## V$v"; cat gcc_v$v.s; done
+      - name: Disassembly, Clang
+        shell: bash
+        run: for v in 0 1 2 3 4; do echo "######## V$v"; cat clang_v$v.s; done
