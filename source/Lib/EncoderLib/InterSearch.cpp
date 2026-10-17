@@ -191,9 +191,23 @@ static bool containsMvCore( const Mv* list, const unsigned n, const Mv& mv )
   return std::find( list, list + n, mv ) != list + n;
 }
 
+static Distortion sumAbsDiffShiftedCore( const Pel* org, const ptrdiff_t orgStride, const Pel* cur, const ptrdiff_t curStride, const int width, const int height, const int shift )
+{
+  Distortion sum = 0;
+  for( int y = 0; y < height; y++, org += orgStride, cur += curStride )
+  {
+    for( int x = 0; x < width; x++ )
+    {
+      sum += abs( cur[x] - org[x] ) >> shift;
+    }
+  }
+  return sum;
+}
+
 BvSearchOps::BvSearchOps( bool enableOpt )
 {
-  containsMv = containsMvCore;
+  containsMv        = containsMvCore;
+  sumAbsDiffShifted = sumAbsDiffShiftedCore;
 #if defined( TARGET_SIMD_X86 ) && ENABLE_SIMD_OPT
   if( enableOpt )
   {
@@ -5841,15 +5855,7 @@ int InterSearch::xIBCSearchMVChromaRefine(CodingUnit& cu,
       refStride = tmpPatternRef.stride;
 
 
-      for (int row = 0; row < height; row++)
-      {
-        for (int col = 0; col < width; col++)
-        {
-          tempSad += ((abs(pRef[col] - pOrg[col])) >> (cu.cs->sps->bitDepths[CH_C] - 8));
-        }
-        pRef += refStride;
-        pOrg += orgStride;
-      }
+      tempSad += m_bvSearchOps.sumAbsDiffShifted( pOrg, orgStride, pRef, refStride, width, height, cu.cs->sps->bitDepths[CH_C] - 8 );
     }
 
     if (tempSad < sadBest)
