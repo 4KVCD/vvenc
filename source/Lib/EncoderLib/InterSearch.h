@@ -334,6 +334,21 @@ struct ReuseUniMv
   void resetReusedUniMvs();
 };
 
+// the SIMD optimized helpers of the IBC block vector search
+struct BvSearchOps
+{
+  BvSearchOps( bool enableOpt = true );
+
+  // true if mv is one of the first n entries of list; used to merge the block vector candidate lists
+  bool ( *containsMv )( const Mv* list, const unsigned n, const Mv& mv );
+
+#if defined( TARGET_SIMD_X86 ) && ENABLE_SIMD_OPT
+  void initBvSearchOpsX86();
+  template<X86_VEXT vext>
+  void _initBvSearchOpsX86();
+#endif
+};
+
 /// encoder search class
 class InterSearch : public InterPrediction, AffineGradientSearch
 {
@@ -347,6 +362,7 @@ private:
   ClpRng            m_lumaClpRng;
   Mv                m_acBVs[2 * IBC_NUM_CANDIDATES];
   unsigned int      m_numBVs;
+  BvSearchOps       m_bvSearchOps;
   IbcBvCand*        m_defaultCachedBvs;
   std::unordered_map< Position, std::unordered_map< Size, BlkRecord> > m_ctuRecord;
   CompStorage       m_orgResiCb[4], m_orgResiCr[4];   // 0:std, 1-3:jointCbCr
@@ -434,6 +450,7 @@ public:
   void       setAffineModeSelected  ( bool flag ) { m_affineModeSelected = flag; }
 
 private:
+  unsigned   xMergeCandLists        ( Mv* dst, unsigned dn, const unsigned dstTotalLength, const Mv* src, const unsigned sn ) const;
   void       xCalcMinDistSbt        ( CodingStructure &cs, const CodingUnit& cu, const uint8_t sbtAllowed );
   /// sub-function for motion vector refinement used in fractional-pel accuracy
   Distortion xPatternRefinement     ( const CPelBuf* pcPatternKey, Mv baseRefMv, int iFrac, Mv& rcMvFrac, Distortion& uiDistBest, int& patternId, CPelBuf* pattern, bool useAltHpelIf );

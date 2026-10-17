@@ -57,6 +57,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "CommonLib/dtrace_buffer.h"
 #include "CommonLib/TimeProfiler.h"
 
+#include <algorithm>
 #include <math.h>
 
  //! \ingroup EncoderLib
@@ -184,6 +185,22 @@ static const bool s_doInterpQ[ 42 ][ 14 ] =
 };
 
 const int BlkUniMvInfoBuffer::m_uniMvListMaxSize;
+
+static bool containsMvCore( const Mv* list, const unsigned n, const Mv& mv )
+{
+  return std::find( list, list + n, mv ) != list + n;
+}
+
+BvSearchOps::BvSearchOps( bool enableOpt )
+{
+  containsMv = containsMvCore;
+#if defined( TARGET_SIMD_X86 ) && ENABLE_SIMD_OPT
+  if( enableOpt )
+  {
+    initBvSearchOpsX86();
+  }
+#endif
+}
 
 InterSearch::InterSearch()
   : m_modeCtrl                    (nullptr)
@@ -5844,33 +5861,20 @@ int InterSearch::xIBCSearchMVChromaRefine(CodingUnit& cu,
 
   return bestCandIdx;
 }
-static unsigned int xMergeCandLists(Mv* dst, unsigned int dn, unsigned int dstTotalLength, Mv* src, unsigned int sn)
+// appends the non-zero candidates of src that are not in dst yet, up to dstTotalLength entries in dst
+unsigned InterSearch::xMergeCandLists( Mv* dst, unsigned dn, const unsigned dstTotalLength, const Mv* src, const unsigned sn ) const
 {
-  for (unsigned int cand = 0; cand < sn && dn < dstTotalLength; cand++)
+  for( unsigned cand = 0; cand < sn && dn < dstTotalLength; cand++ )
   {
-    if (src[cand] == Mv())
+    if( src[cand] != Mv() && !m_bvSearchOps.containsMv( dst, dn, src[cand] ) )
     {
-      continue;
-    }
-    bool found = false;
-    for (int j = 0; j < dn; j++)
-    {
-      if (src[cand] == dst[j])
-      {
-        found = true;
-        break;
-      }
-    }
-
-    if (!found)
-    {
-      dst[dn] = src[cand];
-      dn++;
+      dst[dn++] = src[cand];
     }
   }
 
   return dn;
 }
+
 void InterSearch::xIntraPatternSearchIBC(CodingUnit& cu, TZSearchStruct& cStruct, Mv& rcMv, Distortion& ruiCost, Mv* pcMvSrchRngLT, Mv* pcMvSrchRngRB, Mv* pcMvPred)
 {
   const int   srchRngHorLeft = pcMvSrchRngLT->hor;
