@@ -3608,7 +3608,7 @@ uint8_t InterSearch::skipSbtByRDCost( int width, int height, int mtDepth, uint8_
   return MAX_UCHAR;
 }
 
-void InterSearch::xEstimateInterResidualQT(CodingStructure &cs, Partitioner &partitioner, Distortion *puiZeroDist /*= NULL*/)
+void InterSearch::xEstimateInterResidualQT(CodingStructure &cs, Partitioner &partitioner, Distortion *puiZeroDist /*= NULL*/, const Ctx* savedStartCtx /*= nullptr*/)
 {
   const UnitArea& currArea = partitioner.currArea();
   const SPS &sps           = *cs.sps;
@@ -3641,8 +3641,13 @@ void InterSearch::xEstimateInterResidualQT(CodingStructure &cs, Partitioner &par
   Distortion uiSingleDist         = 0;
   Distortion uiSingleDistComp [3] = { 0, 0, 0 };
 
-  const TempCtx ctxStart  ( m_CtxCache, m_CABACEstimator->getCtx() );
-  TempCtx       ctxBest   ( m_CtxCache );
+  // Saving the contexts copies all of them, so a caller that already holds the current state passes it in.
+  TempCtx ownStartCtx( m_CtxCache );
+  if( !savedStartCtx )
+  {
+    ownStartCtx = m_CABACEstimator->getCtx();
+  }
+  const Ctx& ctxStart = savedStartCtx ? *savedStartCtx : static_cast<const Ctx&>( ownStartCtx );
 
   if (bCheckFull)
   {
@@ -3673,7 +3678,8 @@ void InterSearch::xEstimateInterResidualQT(CodingStructure &cs, Partitioner &par
     bestTU.initData();
     bestTU.UnitArea::operator=( currArea );
 
-    bool ctxIsStart = true;   // nothing coded since ctxStart was saved: the first restore below can be skipped
+    bool lumaResidualCoded   = false;
+    bool chromaResidualCoded = false;
     for( uint32_t c = 0; c < numTBlocks; c++ )
     {
       const ComponentID compID    = ComponentID(c);
@@ -3684,6 +3690,11 @@ void InterSearch::xEstimateInterResidualQT(CodingStructure &cs, Partitioner &par
       {
         continue;
       }
+      // The first restore below can be skipped while the contexts this component reads are still those of ctxStart.
+      // Luma and chroma residual coding use separate contexts and each component has its own cbf contexts, so only
+      // chroma residual changes what a chroma component reads. Chroma shares the transform skip residual contexts with
+      // luma, but it only tests transform skip after luma chose it.
+      bool ctxIsStart = isLuma( compID ) || ( !chromaResidualCoded && tu.mtsIdx[COMP_Y] != MTS_SKIP );
       bool tsAllowed = useTS && TU::isTSAllowed(tu, compID) && (isLuma(compID) || (isChroma(compID) && m_pcEncCfg->m_useChromaTS));
       if (isChroma(compID) && tsAllowed && (tu.mtsIdx[COMP_Y] != MTS_SKIP))
       {
@@ -3786,6 +3797,7 @@ void InterSearch::xEstimateInterResidualQT(CodingStructure &cs, Partitioner &par
 
         if (currAbsSum > 0) //if non-zero coefficients are present, a residual needs to be derived for further prediction
         {
+          ( isLuma( compID ) ? lumaResidualCoded : chromaResidualCoded ) = true;
           if (isFirstMode)
           {
             // since ctxStart (restored above, or never left) only the zero cbf was coded; checktransformsNxN and
@@ -4061,7 +4073,18 @@ void InterSearch::xEstimateInterResidualQT(CodingStructure &cs, Partitioner &par
       }
     }
 
-    m_CABACEstimator->getCtx() = ctxStart;
+    if( lumaResidualCoded || chromaResidualCoded )
+    {
+      m_CABACEstimator->getCtx() = ctxStart;
+    }
+    else
+    {
+      // Without any residual only the zero cbfs were coded.
+      for( uint32_t c = 0; c < numTBlocks; c++ )
+      {
+        m_CABACEstimator->getCtx() = SubCtx( Ctx::QtCbf[c], ctxStart );
+      }
+    }
     m_CABACEstimator->resetBits();
     if( !tu.noResidual )
     {
@@ -4239,7 +4262,7 @@ void InterSearch::encodeResAndCalcRdInterCU(CodingStructure &cs, Partitioner &pa
 
   const TempCtx ctxStart( m_CtxCache, m_CABACEstimator->getCtx() );
 
-  xEstimateInterResidualQT(cs, partitioner, &zeroDistortion );
+  xEstimateInterResidualQT(cs, partitioner, &zeroDistortion, &static_cast<const Ctx&>( ctxStart ) );
   TransformUnit& firstTU = *cs.getTU( partitioner.chType );
 
   cu.rootCbf = false;

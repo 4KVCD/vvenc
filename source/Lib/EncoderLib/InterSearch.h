@@ -629,7 +629,7 @@ private:
   void xExtDIFUpSamplingQ             ( CPelBuf* pcPatternKey, Mv halfPelRef, int& patternId );
 
   void xEncodeInterResidualQT         ( CodingStructure &cs, Partitioner &partitioner, const ComponentID compID );
-  void xEstimateInterResidualQT       ( CodingStructure &cs, Partitioner &partitioner, Distortion *puiZeroDist = NULL );
+  void xEstimateInterResidualQT       ( CodingStructure &cs, Partitioner &partitioner, Distortion *puiZeroDist = NULL, const Ctx* savedStartCtx = nullptr );
   uint64_t xGetSymbolFracBitsInter    ( CodingStructure &cs, Partitioner &partitioner );
   void  xSetIntraSearchRangeIBC       ( CodingUnit& pu, int iRoiWidth, int iRoiHeight, Mv& rcMvSrchRngLT, Mv& rcMvSrchRngRB);
   void  xIBCEstimation                ( CodingUnit& cu, PelUnitBuf& origBuf, Mv* pcMvPred, Mv& rcMv, Distortion& ruiCost );
