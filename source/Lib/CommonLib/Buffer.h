@@ -210,6 +210,14 @@ struct AreaBuf : public Size
   template<bool T_IS_CONST = std::is_const<T>::value>
   AreaBuf( const AreaBuf<typename std::remove_const_t<T>>& other, std::enable_if_t<T_IS_CONST>* = 0) : Size( other ), buf( other.buf ), stride( other.stride ) { }
 
+  void setFields( const AreaBuf& other )
+  {
+    width  = other.width;
+    height = other.height;
+    buf    = other.buf;
+    stride = other.stride;
+  }
+
   void fill                 ( const T &val );
   void memset               ( const int val );
 
@@ -745,10 +753,11 @@ struct UnitBuf
   UnitBuf() : chromaFormat( NUM_CHROMA_FORMAT ) { }
   UnitBuf( const ChromaFormat _chromaFormat, const UnitBufBuffers&  _bufs ) : chromaFormat( _chromaFormat ), bufs( _bufs ) { }
   UnitBuf( const ChromaFormat _chromaFormat,       UnitBufBuffers&& _bufs ) : chromaFormat( _chromaFormat ), bufs( std::forward<UnitBufBuffers>( _bufs ) ) { }
-  UnitBuf( const ChromaFormat _chromaFormat, const AreaBuf<T>&  blkY )      : chromaFormat( _chromaFormat ), bufs{ blkY } { }
-  UnitBuf( const ChromaFormat _chromaFormat,       AreaBuf<T>&& blkY )      : chromaFormat( _chromaFormat ), bufs{ std::forward<AreaBuf<T> >(blkY) } { }
-  UnitBuf( const ChromaFormat _chromaFormat, const AreaBuf<T>&  blkY, const AreaBuf<T>&  blkCb, const AreaBuf<T>  &blkCr ) : chromaFormat( _chromaFormat ), bufs{ blkY, blkCb, blkCr } { }
-  UnitBuf( const ChromaFormat _chromaFormat,       AreaBuf<T>&& blkY,       AreaBuf<T>&& blkCb,       AreaBuf<T> &&blkCr ) : chromaFormat( _chromaFormat ), bufs{ std::forward<AreaBuf<T> >(blkY), std::forward<AreaBuf<T> >(blkCb), std::forward<AreaBuf<T> >(blkCr) } { }
+  // field by field: the blocks are usually temporaries just built, and a wider load can't take narrower stores' data
+  UnitBuf( const ChromaFormat _chromaFormat, const AreaBuf<T>&  blkY )      : chromaFormat( _chromaFormat ) { bufs.resize_noinit( 1 ); bufs[0].setFields( blkY ); }
+  UnitBuf( const ChromaFormat _chromaFormat,       AreaBuf<T>&& blkY )      : chromaFormat( _chromaFormat ) { bufs.resize_noinit( 1 ); bufs[0].setFields( blkY ); }
+  UnitBuf( const ChromaFormat _chromaFormat, const AreaBuf<T>&  blkY, const AreaBuf<T>&  blkCb, const AreaBuf<T>  &blkCr ) : chromaFormat( _chromaFormat ) { bufs.resize_noinit( 3 ); bufs[0].setFields( blkY ); bufs[1].setFields( blkCb ); bufs[2].setFields( blkCr ); }
+  UnitBuf( const ChromaFormat _chromaFormat,       AreaBuf<T>&& blkY,       AreaBuf<T>&& blkCb,       AreaBuf<T> &&blkCr ) : chromaFormat( _chromaFormat ) { bufs.resize_noinit( 3 ); bufs[0].setFields( blkY ); bufs[1].setFields( blkCb ); bufs[2].setFields( blkCr ); }
 
   UnitBuf( const UnitBuf& other )  = default;
   UnitBuf(       UnitBuf&& other ) = default;
