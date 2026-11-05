@@ -337,6 +337,7 @@ VVENC_DECL void vvenc_vvencMCTF_default(vvencMCTF *vvencMCTF )
   vvencMCTF->numFrames = 0;
   vvencMCTF->numStrength = 0;
   vvencMCTF->MCTFUnitSize = -1;
+  vvencMCTF->MCTFKeepDetail = -1;
   memset( vvencMCTF->MCTFFrames, 0, sizeof( vvencMCTF->MCTFFrames ) );
   memset( vvencMCTF->MCTFStrengths, 0, sizeof( vvencMCTF->MCTFStrengths ) );
 }
@@ -1519,6 +1520,12 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
     c->m_vvencMCTF.MCTFUnitSize = std::min( c->m_SourceWidth, c->m_SourceHeight ) < 720 ? 8 : 16;
   }
 
+  if( c->m_vvencMCTF.MCTFKeepDetail == -1 )
+  {
+    // above this the band costs more than it brings: larger files and visible steps between coded and skipped blocks. Under rate control m_QP is only a guess.
+    c->m_vvencMCTF.MCTFKeepDetail = c->m_RCTargetBitrate == 0 && c->m_QP < 16 ? 1 : 0;
+  }
+
   if ( c->m_vvencMCTF.MCTF && c->m_vvencMCTF.numFrames == 0 && c->m_vvencMCTF.numStrength == 0 )
   {
     const int log2GopSize = std::min<int>( 6, vvenc::floorLog2( c->m_GOPSize ) );
@@ -2034,6 +2041,7 @@ static bool checkCfgParameter( vvenc_config *c )
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTF > 2 || c->m_vvencMCTF.MCTF < 0,                    "MCTF out of range" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.numFrames != c->m_vvencMCTF.numStrength,                "MCTF parameter list sizes differ" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFSpeed < 0 || c->m_vvencMCTF.MCTFSpeed > 4,          "MCTFSpeed exceeds supported range (0..4)" );
+  vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFKeepDetail < 0 || c->m_vvencMCTF.MCTFKeepDetail > 1, "MCTFKeepDetail must be -1, 0 or 1" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize < 8,                                       "MCTFUnitSize is smaller than 8" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize > 32,                                      "MCTFUnitSize is larger than 32" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize & ( c->m_vvencMCTF.MCTFUnitSize - 1 ),     "MCTFUnitSize is not a power of 2" );
