@@ -206,6 +206,17 @@ struct AreaBuf : public Size
   AreaBuf& operator=( const AreaBuf& )  = default;
   AreaBuf& operator=(       AreaBuf&& ) = default;
 
+  // no temporary: a wide load of one, just written by narrower stores, can't take their data
+  template<bool T_IS_CONST = std::is_const<T>::value>
+  std::enable_if_t<T_IS_CONST, AreaBuf&> operator=( const AreaBuf<typename std::remove_const_t<T>>& other )
+  {
+    width  = other.width;
+    height = other.height;
+    buf    = other.buf;
+    stride = other.stride;
+    return *this;
+  }
+
   // conversion from AreaBuf<const T> to AreaBuf<T>
   template<bool T_IS_CONST = std::is_const<T>::value>
   AreaBuf( const AreaBuf<typename std::remove_const_t<T>>& other, std::enable_if_t<T_IS_CONST>* = 0) : Size( other ), buf( other.buf ), stride( other.stride ) { }
