@@ -603,6 +603,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
   IStreamToQP                       toQP                          ( &c->m_QP, &c->m_QPFractionVal );
   IStreamToInt8                     toLumaLevelToDeltaQP          ( &c->m_lumaLevelToDeltaQPEnabled );
   IStreamToInt8                     toMTSImplicit                 ( &c->m_MTSImplicit );
+  IStreamToInt8                     toVeryLowQPSpeedUp            ( &c->m_veryLowQPSpeedUp );
 
   IStreamToEnum<int8_t>             toUseWpp                      ( &c->m_entropyCodingSyncEnabled,    &FlagToIntMap<int8_t> );
   IStreamToEnum<int8_t>             toUseIfp                      ( &c->m_ifp,                         &FlagToIntMap<int8_t> );
@@ -982,6 +983,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
     ("FastUDIUseMPMEnabled",                            c->m_bFastUDIUseMPMEnabled,                          "If enabled, adapt intra direction search, accounting for MPM")
     ("FastMEForGenBLowDelayEnabled",                    c->m_bFastMEForGenBLowDelayEnabled,                  "If enabled use a fast ME for generalised B Low Delay slices")
 
+    ("VeryLowQPSpeedUp",                                toVeryLowQPSpeedUp,                                  "Turn off LFNST, BDOF, DMVR, PROF, SbTMVP and quad splits under 8 in B pictures, which save no bytes at very low QP: -1 auto (on below QP 16, with two rate-control passes decided by the second, off with one; overrides those tools' own options), 0 off (keeps them), 1 on\n")
     ("MTSImplicit",                                     toMTSImplicit,                                       "Implicit MTS when explicit MTS is off: -1 auto (off below QP 16, with two rate-control passes decided by the second, on with one), 0 off, 1 on\n")
     ("TMVPMode",                                        c->m_TMVPModeId,                                     "TMVP mode enable(0: off 1: for all slices 2: for certain slices only)")
     ("DepQuant",                                        c->m_DepQuantEnabled,                                "Enable dependent quantization" )

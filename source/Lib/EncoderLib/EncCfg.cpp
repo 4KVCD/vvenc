@@ -88,6 +88,16 @@ void initMCTFStrengths( vvencMCTF& mctf, int GOPSize, int QP, int QPFractionVal,
   mctf.MCTFStrengths[mctf.numFrames - 1] = Clip3( 0.0, 1.5, ( exactQP - 4.0 ) * 3.0 / 32.0 );
 }
 
+void turnOffToolsForVeryLowQP( vvenc_config& cfg )
+{
+  cfg.m_LFNST    = 0;
+  cfg.m_BDOF     = 0;
+  cfg.m_DMVR     = 0;
+  cfg.m_PROF     = 0;
+  cfg.m_SbTMVP   = 0;
+  cfg.m_MinQT[1] = std::max( cfg.m_MinQT[1], 8u );
+}
+
 static unsigned getMaxTlVal( unsigned perTlVal )
 {
   unsigned maxVal = 0;

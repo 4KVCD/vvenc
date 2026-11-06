@@ -383,6 +383,15 @@ void EncLib::xDecideVeryLowQPAuto()
   {
     cfg.m_MTSImplicit = veryLowQP ? 0 : 1;
   }
+  if( cfg.m_veryLowQPSpeedUp == -1 )
+  {
+    cfg.m_veryLowQPSpeedUp = veryLowQP ? 1 : 0;
+    if( veryLowQP )
+    {
+      // after checkCfgParameter, but safe: it only turns tools off and raises MinQT[1] to 8, both valid in any config
+      turnOffToolsForVeryLowQP( cfg );
+    }
+  }
   if( cfg.m_vvencMCTF.MCTFKeepDetail == -1 )
   {
     cfg.m_vvencMCTF.MCTFKeepDetail = veryLowQP ? 1 : 0;
@@ -410,9 +419,14 @@ void EncLib::xInitRCCfg()
 
   // fixed-QP encoding in first rate control pass
   m_firstPassCfg.m_RCTargetBitrate = 0;
+  // the first pass codes at a fixed QP far above the very-low-QP range; the second pass decides the auto options
   if( m_firstPassCfg.m_vvencMCTF.MCTFKeepDetail == -1 )
   {
     m_firstPassCfg.m_vvencMCTF.MCTFKeepDetail = 0;
+  }
+  if( m_firstPassCfg.m_veryLowQPSpeedUp == -1 )
+  {
+    m_firstPassCfg.m_veryLowQPSpeedUp = 0;
   }
   if( m_firstPassCfg.m_FirstPassMode > 2 )
   {

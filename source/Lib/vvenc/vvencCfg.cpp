@@ -527,6 +527,7 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   c->m_bFastUDIUseMPMEnabled                   = true;
   c->m_bFastMEForGenBLowDelayEnabled           = true;
 
+  c->m_veryLowQPSpeedUp                        = -1;
   c->m_MTSImplicit                             = 0;
   c->m_TMVPModeId                              = 1;
   c->m_DepQuantEnabled                         = true;
@@ -1535,6 +1536,14 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
     // Implicit MTS forces DST7 on small intra blocks without testing DCT2. A source that was itself coded with DCT2 (ProRes, HEVC) is sparse in DCT2, and at very low QP that sparsity is worth more than DST7's gain on the prediction residual. Above this, DST7 wins
     c->m_MTSImplicit = veryLowQP ? 0 : 1;
   }
+  if( c->m_veryLowQPSpeedUp == -1 && !decidedInSecondPass )
+  {
+    c->m_veryLowQPSpeedUp = veryLowQP ? 1 : 0;
+  }
+  if( c->m_veryLowQPSpeedUp == 1 )
+  {
+    vvenc::turnOffToolsForVeryLowQP( *c );
+  }
 
   if ( c->m_vvencMCTF.MCTF && c->m_vvencMCTF.numFrames == 0 && c->m_vvencMCTF.numStrength == 0 )
   {
@@ -2045,6 +2054,7 @@ static bool checkCfgParameter( vvenc_config *c )
   const int lowestLeftAuto = c->m_RCTargetBitrate > 0 && c->m_RCNumPasses == 2 ? -1 : 0;   // the second pass decides
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFKeepDetail < lowestLeftAuto || c->m_vvencMCTF.MCTFKeepDetail > 1, "MCTFKeepDetail must be -1, 0 or 1" );
   vvenc_confirmParameter( c, c->m_MTSImplicit < lowestLeftAuto || c->m_MTSImplicit > 1, "MTSImplicit must be -1, 0 or 1" );
+  vvenc_confirmParameter( c, c->m_veryLowQPSpeedUp < lowestLeftAuto || c->m_veryLowQPSpeedUp > 1, "VeryLowQPSpeedUp must be -1, 0 or 1" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize < 8,                                       "MCTFUnitSize is smaller than 8" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize > 32,                                      "MCTFUnitSize is larger than 32" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize & ( c->m_vvencMCTF.MCTFUnitSize - 1 ),     "MCTFUnitSize is not a power of 2" );
@@ -3351,6 +3361,7 @@ VVENC_DECL const char* vvenc_get_config_as_string( vvenc_config *c, vvencMsgLeve
     css << "BDOF:" << c->m_BDOF << " ";
     css << "DMVR:" << c->m_DMVR << " ";
     css << "MTSImplicit:" << (int)c->m_MTSImplicit << " ";
+    css << "VeryLowQPSpeedUp:" << (int) c->m_veryLowQPSpeedUp << " ";
     css << "SBT:" << c->m_SBT << " ";
     css << "JCbCr:" << c->m_JointCbCrMode << " ";
     css << "CabacInitPresent:" << c->m_cabacInitPresent << " ";

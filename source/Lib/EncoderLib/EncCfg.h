@@ -114,6 +114,9 @@ private:
 // The pictures MCTF filters and how strongly, for a QP. Rate control filters one level more at the same QP.
 void initMCTFStrengths( vvencMCTF& mctf, int GOPSize, int QP, int QPFractionVal, bool rateControl );
 
+// Below QP 16 nearly all the bytes are coefficients of the source's own noise, which these tools can't predict or compact.
+void turnOffToolsForVeryLowQP( vvenc_config& cfg );
+
 }
 
 
