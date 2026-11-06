@@ -73,6 +73,21 @@ VVEncCfg& VVEncCfg::operator= ( const vvenc_config& extern_cfg )
   return *this;
 }
 
+void initMCTFStrengths( vvencMCTF& mctf, int GOPSize, int QP, int QPFractionVal, bool rateControl )
+{
+  const int    log2GopSize = std::min<int>( 6, floorLog2( GOPSize ) );
+  const double exactQP     = QP + QPFractionVal / 256.0;
+
+  mctf.numFrames = mctf.numStrength = std::max( 1, log2GopSize - ( ( QP - ( rateControl ? 1 : 0 ) ) >> 4 ) );
+
+  for( int i = 0; i < mctf.numFrames; i++ )
+  {
+    mctf.MCTFFrames[i]    = GOPSize >> ( mctf.numFrames - i - 1 );
+    mctf.MCTFStrengths[i] = Clip3( 0.0, 2.0, ( exactQP - 4.0 ) / 8.0 ) / double( mctf.numFrames - i );
+  }
+  mctf.MCTFStrengths[mctf.numFrames - 1] = Clip3( 0.0, 1.5, ( exactQP - 4.0 ) * 3.0 / 32.0 );
+}
+
 static unsigned getMaxTlVal( unsigned perTlVal )
 {
   unsigned maxVal = 0;

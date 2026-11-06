@@ -48,6 +48,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "vvenc/vvencCfg.h"
 
 #define VVENC_MAX_NUM_INTENSITIES             256
+#define VVENC_VERY_LOW_QP                     16   // below it the source's own detail survives quantisation
 #define VVENC_MAX_NUM_MODEL_VALUES            6
 
 namespace vvenc {
@@ -109,6 +110,9 @@ struct VVEncCfg : public vvenc_config
 private:
   void xInitCfgMembers();
 };
+
+// The pictures MCTF filters and how strongly, for a QP. Rate control filters one level more at the same QP.
+void initMCTFStrengths( vvencMCTF& mctf, int GOPSize, int QP, int QPFractionVal, bool rateControl );
 
 }
 

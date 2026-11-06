@@ -51,6 +51,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "CommonLib/Slice.h"
 #include "CommonLib/ProfileLevelTier.h"
 #include "Utilities/MsgLog.h"
+#include "EncoderLib/EncCfg.h"
 #include "EncoderLib/GOPCfg.h"
 
 #include <math.h>
@@ -1520,14 +1521,16 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
     c->m_vvencMCTF.MCTFUnitSize = std::min( c->m_SourceWidth, c->m_SourceHeight ) < 720 ? 8 : 16;
   }
 
-  // At very low QP the source's own detail survives quantisation. Under rate control m_QP is only a guess.
-  const bool veryLowQP = c->m_RCTargetBitrate == 0 && c->m_QP < 16;
-  if( c->m_vvencMCTF.MCTFKeepDetail == -1 )
+  // At very low QP the source's own detail survives quantisation. Under rate control m_QP is only a guess:
+  // with two passes the second one decides, once the first has shown what QP the target means (EncLib::xDecideVeryLowQPAuto).
+  const bool decidedInSecondPass = c->m_RCTargetBitrate > 0 && c->m_RCNumPasses == 2;
+  const bool veryLowQP           = c->m_RCTargetBitrate == 0 && c->m_QP < VVENC_VERY_LOW_QP;
+  if( c->m_vvencMCTF.MCTFKeepDetail == -1 && !( decidedInSecondPass && c->m_vvencMCTF.MCTF ) )
   {
     // above this the band costs more than it brings: larger files and visible steps between coded and skipped blocks
     c->m_vvencMCTF.MCTFKeepDetail = veryLowQP ? 1 : 0;
   }
-  if( c->m_MTSImplicit == -1 )
+  if( c->m_MTSImplicit == -1 && !decidedInSecondPass )
   {
     // Implicit MTS forces DST7 on small intra blocks without testing DCT2. A source that was itself coded with DCT2 (ProRes, HEVC) is sparse in DCT2, and at very low QP that sparsity is worth more than DST7's gain on the prediction residual. Above this, DST7 wins
     c->m_MTSImplicit = veryLowQP ? 0 : 1;
@@ -1535,16 +1538,7 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
 
   if ( c->m_vvencMCTF.MCTF && c->m_vvencMCTF.numFrames == 0 && c->m_vvencMCTF.numStrength == 0 )
   {
-    const int log2GopSize = std::min<int>( 6, vvenc::floorLog2( c->m_GOPSize ) );
-
-    c->m_vvencMCTF.numFrames = c->m_vvencMCTF.numStrength = std::max( 1, log2GopSize - ( ( c->m_QP - ( c->m_RCTargetBitrate > 0 ? 1 : 0 ) ) >> 4 ) );
-
-    for ( int i = 0; i < c->m_vvencMCTF.numFrames; i++ )
-    {
-      c->m_vvencMCTF.MCTFFrames[i] = c->m_GOPSize >> ( c->m_vvencMCTF.numFrames - i - 1 );
-      c->m_vvencMCTF.MCTFStrengths[i] = vvenc::Clip3( 0.0, 2.0, ( c->m_QP + c->m_QPFractionVal / 256.0 - 4.0 ) / 8.0 ) / double ( c->m_vvencMCTF.numFrames - i );
-    }
-    c->m_vvencMCTF.MCTFStrengths[c->m_vvencMCTF.numFrames - 1] = vvenc::Clip3( 0.0, 1.5, ( c->m_QP + c->m_QPFractionVal / 256.0 - 4.0 ) * 3.0 / 32.0 );
+    vvenc::initMCTFStrengths( c->m_vvencMCTF, c->m_GOPSize, c->m_QP, c->m_QPFractionVal, c->m_RCTargetBitrate > 0 );
   }
 
   if( c->m_cuTreeBlockSize == -1 )
@@ -2048,8 +2042,9 @@ static bool checkCfgParameter( vvenc_config *c )
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTF > 2 || c->m_vvencMCTF.MCTF < 0,                    "MCTF out of range" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.numFrames != c->m_vvencMCTF.numStrength,                "MCTF parameter list sizes differ" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFSpeed < 0 || c->m_vvencMCTF.MCTFSpeed > 4,          "MCTFSpeed exceeds supported range (0..4)" );
-  vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFKeepDetail < 0 || c->m_vvencMCTF.MCTFKeepDetail > 1, "MCTFKeepDetail must be -1, 0 or 1" );
-  vvenc_confirmParameter( c, c->m_MTSImplicit < 0 || c->m_MTSImplicit > 1, "MTSImplicit must be -1, 0 or 1" );
+  const int lowestLeftAuto = c->m_RCTargetBitrate > 0 && c->m_RCNumPasses == 2 ? -1 : 0;   // the second pass decides
+  vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFKeepDetail < lowestLeftAuto || c->m_vvencMCTF.MCTFKeepDetail > 1, "MCTFKeepDetail must be -1, 0 or 1" );
+  vvenc_confirmParameter( c, c->m_MTSImplicit < lowestLeftAuto || c->m_MTSImplicit > 1, "MTSImplicit must be -1, 0 or 1" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize < 8,                                       "MCTFUnitSize is smaller than 8" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize > 32,                                      "MCTFUnitSize is larger than 32" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize & ( c->m_vvencMCTF.MCTFUnitSize - 1 ),     "MCTFUnitSize is not a power of 2" );

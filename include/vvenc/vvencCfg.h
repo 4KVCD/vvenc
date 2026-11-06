@@ -411,7 +411,7 @@ typedef struct vvencMCTF
   int                 MCTFSpeed;
   bool                MCTFFutureReference;
   int                 MCTFUnitSize;
-  int                 MCTFKeepDetail;                                                    // -1: auto (below QP 16, without rate control), 0: off, 1: keep the fine band of noisy sources
+  int                 MCTFKeepDetail;                                                    // -1: auto (below QP 16; with two rate-control passes the second decides; off with one), 0: off, 1: keep the fine band of noisy sources
 
   int                 numFrames;
   int                 MCTFFrames[VVENC_MAX_MCTF_FRAMES];
@@ -585,7 +585,7 @@ typedef struct vvenc_config
   bool                m_bFastUDIUseMPMEnabled;
   bool                m_bFastMEForGenBLowDelayEnabled;
 
-  int8_t              m_MTSImplicit;                                                     // -1: auto (off below QP 16, without rate control), 0: off, 1: on
+  int8_t              m_MTSImplicit;                                                     // -1: auto (off below QP 16; with two rate-control passes the second decides; on with one), 0: off, 1: on
   int                 m_TMVPModeId;
   bool                m_DepQuantEnabled;
   bool                m_SignDataHidingEnabled;

@@ -222,6 +222,7 @@ void EncLib::initPass( int pass, const char* statsFName )
       const_cast<VVEncCfg&>(m_encCfg) = m_orgCfg;
       m_rateCtrl->init( m_encCfg );
       const_cast<VVEncCfg&>(m_encCfg).m_QP = m_rateCtrl->getBaseQP();
+      xDecideVeryLowQPAuto();
     }
     if( m_encCfg.m_RCTargetBitrate > 0 && !m_encCfg.m_LookAhead )
     {
@@ -372,6 +373,32 @@ void EncLib::xUninitLib()
   }
 }
 
+void EncLib::xDecideVeryLowQPAuto()
+{
+  VVEncCfg& cfg = const_cast<VVEncCfg&>(m_encCfg);
+  // getBaseQP() leans towards a QP from the resolution, so at these targets the pictures run lower than it says: one higher than constant QP's limit
+  const bool veryLowQP = m_encCfg.m_QP <= VVENC_VERY_LOW_QP;
+
+  if( cfg.m_MTSImplicit == -1 )
+  {
+    cfg.m_MTSImplicit = veryLowQP ? 0 : 1;
+  }
+  if( cfg.m_vvencMCTF.MCTFKeepDetail == -1 )
+  {
+    cfg.m_vvencMCTF.MCTFKeepDetail = veryLowQP ? 1 : 0;
+
+    // Strengths still at what config derived from its guess of the QP, which at high targets is far too low: nothing would be
+    // filtered, so nothing kept. Strengths the user chose differ from these and stay. Config runs twice, so it can't tell them apart.
+    vvencMCTF fromGuess = cfg.m_vvencMCTF;
+    initMCTFStrengths( fromGuess, cfg.m_GOPSize, m_orgCfg.m_QP, cfg.m_QPFractionVal, true );
+    const bool strengthsDerived = fromGuess.numFrames == cfg.m_vvencMCTF.numFrames && std::equal( fromGuess.MCTFStrengths, fromGuess.MCTFStrengths + fromGuess.numFrames, cfg.m_vvencMCTF.MCTFStrengths );
+    if( veryLowQP && strengthsDerived )
+    {
+      initMCTFStrengths( cfg.m_vvencMCTF, cfg.m_GOPSize, cfg.m_QP, cfg.m_QPFractionVal, true );
+    }
+  }
+}
+
 void EncLib::xInitRCCfg()
 {
   // backup original configuration
@@ -383,6 +410,10 @@ void EncLib::xInitRCCfg()
 
   // fixed-QP encoding in first rate control pass
   m_firstPassCfg.m_RCTargetBitrate = 0;
+  if( m_firstPassCfg.m_vvencMCTF.MCTFKeepDetail == -1 )
+  {
+    m_firstPassCfg.m_vvencMCTF.MCTFKeepDetail = 0;
+  }
   if( m_firstPassCfg.m_FirstPassMode > 2 )
   {
     m_firstPassCfg.m_SourceWidth  = ( m_encCfg.m_SourceWidth  >> 1 ) & ( ~7 );
