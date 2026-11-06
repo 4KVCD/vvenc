@@ -602,6 +602,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
   IStreamToInt8                     toCuTreeBlockSize             ( &c->m_cuTreeBlockSize );
   IStreamToQP                       toQP                          ( &c->m_QP, &c->m_QPFractionVal );
   IStreamToInt8                     toLumaLevelToDeltaQP          ( &c->m_lumaLevelToDeltaQPEnabled );
+  IStreamToInt8                     toMTSImplicit                 ( &c->m_MTSImplicit );
 
   IStreamToEnum<int8_t>             toUseWpp                      ( &c->m_entropyCodingSyncEnabled,    &FlagToIntMap<int8_t> );
   IStreamToEnum<int8_t>             toUseIfp                      ( &c->m_ifp,                         &FlagToIntMap<int8_t> );
@@ -981,7 +982,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
     ("FastUDIUseMPMEnabled",                            c->m_bFastUDIUseMPMEnabled,                          "If enabled, adapt intra direction search, accounting for MPM")
     ("FastMEForGenBLowDelayEnabled",                    c->m_bFastMEForGenBLowDelayEnabled,                  "If enabled use a fast ME for generalised B Low Delay slices")
 
-    ("MTSImplicit",                                     c->m_MTSImplicit,                                    "Enable implicit MTS when explicit MTS is off\n")
+    ("MTSImplicit",                                     toMTSImplicit,                                       "Implicit MTS when explicit MTS is off: -1 auto (off below QP 16, without rate control), 0 off, 1 on\n")
     ("TMVPMode",                                        c->m_TMVPModeId,                                     "TMVP mode enable(0: off 1: for all slices 2: for certain slices only)")
     ("DepQuant",                                        c->m_DepQuantEnabled,                                "Enable dependent quantization" )
     ("QuantThrVal",                                     c->m_quantThresholdVal,                              "Quantization threshold value for DQ last coefficient search" )

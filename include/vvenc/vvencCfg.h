@@ -585,7 +585,7 @@ typedef struct vvenc_config
   bool                m_bFastUDIUseMPMEnabled;
   bool                m_bFastMEForGenBLowDelayEnabled;
 
-  bool                m_MTSImplicit;
+  int8_t              m_MTSImplicit;                                                     // -1: auto (off below QP 16, without rate control), 0: off, 1: on
   int                 m_TMVPModeId;
   bool                m_DepQuantEnabled;
   bool                m_SignDataHidingEnabled;

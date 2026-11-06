@@ -526,7 +526,7 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   c->m_bFastUDIUseMPMEnabled                   = true;
   c->m_bFastMEForGenBLowDelayEnabled           = true;
 
-  c->m_MTSImplicit                             = false;
+  c->m_MTSImplicit                             = 0;
   c->m_TMVPModeId                              = 1;
   c->m_DepQuantEnabled                         = true;
   c->m_SignDataHidingEnabled                   = false;
@@ -1520,10 +1520,17 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
     c->m_vvencMCTF.MCTFUnitSize = std::min( c->m_SourceWidth, c->m_SourceHeight ) < 720 ? 8 : 16;
   }
 
+  // At very low QP the source's own detail survives quantisation. Under rate control m_QP is only a guess.
+  const bool veryLowQP = c->m_RCTargetBitrate == 0 && c->m_QP < 16;
   if( c->m_vvencMCTF.MCTFKeepDetail == -1 )
   {
-    // above this the band costs more than it brings: larger files and visible steps between coded and skipped blocks. Under rate control m_QP is only a guess.
-    c->m_vvencMCTF.MCTFKeepDetail = c->m_RCTargetBitrate == 0 && c->m_QP < 16 ? 1 : 0;
+    // above this the band costs more than it brings: larger files and visible steps between coded and skipped blocks
+    c->m_vvencMCTF.MCTFKeepDetail = veryLowQP ? 1 : 0;
+  }
+  if( c->m_MTSImplicit == -1 )
+  {
+    // Implicit MTS forces DST7 on small intra blocks without testing DCT2. A source that was itself coded with DCT2 (ProRes, HEVC) is sparse in DCT2, and at very low QP that sparsity is worth more than DST7's gain on the prediction residual. Above this, DST7 wins
+    c->m_MTSImplicit = veryLowQP ? 0 : 1;
   }
 
   if ( c->m_vvencMCTF.MCTF && c->m_vvencMCTF.numFrames == 0 && c->m_vvencMCTF.numStrength == 0 )
@@ -2042,6 +2049,7 @@ static bool checkCfgParameter( vvenc_config *c )
   vvenc_confirmParameter( c, c->m_vvencMCTF.numFrames != c->m_vvencMCTF.numStrength,                "MCTF parameter list sizes differ" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFSpeed < 0 || c->m_vvencMCTF.MCTFSpeed > 4,          "MCTFSpeed exceeds supported range (0..4)" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFKeepDetail < 0 || c->m_vvencMCTF.MCTFKeepDetail > 1, "MCTFKeepDetail must be -1, 0 or 1" );
+  vvenc_confirmParameter( c, c->m_MTSImplicit < 0 || c->m_MTSImplicit > 1, "MTSImplicit must be -1, 0 or 1" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize < 8,                                       "MCTFUnitSize is smaller than 8" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize > 32,                                      "MCTFUnitSize is larger than 32" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFUnitSize & ( c->m_vvencMCTF.MCTFUnitSize - 1 ),     "MCTFUnitSize is not a power of 2" );
@@ -2793,7 +2801,7 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
       c->m_LMChroma                        = 1;
       c->m_vvencMCTF.MCTF                  = 2;
       c->m_vvencMCTF.MCTFSpeed             = 4;
-      c->m_MTSImplicit                     = 1;
+      c->m_MTSImplicit                     = -1;
       // scc
       c->m_IBCFastMethod                   = 6;
       c->m_TSsize                          = 3;
@@ -2862,7 +2870,7 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
       c->m_vvencMCTF.MCTFSpeed             = 3;
       c->m_MMVD                            = 3;
       c->m_MRL                             = 1;
-      c->m_MTSImplicit                     = 1;
+      c->m_MTSImplicit                     = -1;
       c->m_PROF                            = 1;
       c->m_SbTMVP                          = 1;
       // scc
@@ -2937,7 +2945,7 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
       c->m_useFastMIP                      = 3;
       c->m_MMVD                            = 3;
       c->m_MRL                             = 1;
-      c->m_MTSImplicit                     = 1;
+      c->m_MTSImplicit                     = -1;
       c->m_PROF                            = 1;
       c->m_SbTMVP                          = 1;
       c->m_SMVD                            = 3;
@@ -3031,7 +3039,7 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
       c->m_useFastMIP                      = 0;
       c->m_MMVD                            = 3;
       c->m_MRL                             = 1;
-      c->m_MTSImplicit                     = 1;
+      c->m_MTSImplicit                     = -1;
       c->m_PROF                            = 1;
       c->m_SBT                             = 1;
       c->m_SbTMVP                          = 1;
@@ -3347,7 +3355,7 @@ VVENC_DECL const char* vvenc_get_config_as_string( vvenc_config *c, vvencMsgLeve
     css << "CST:" << c->m_dualITree << " ";
     css << "BDOF:" << c->m_BDOF << " ";
     css << "DMVR:" << c->m_DMVR << " ";
-    css << "MTSImplicit:" << c->m_MTSImplicit << " ";
+    css << "MTSImplicit:" << (int)c->m_MTSImplicit << " ";
     css << "SBT:" << c->m_SBT << " ";
     css << "JCbCr:" << c->m_JointCbCrMode << " ";
     css << "CabacInitPresent:" << c->m_cabacInitPresent << " ";
