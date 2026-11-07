@@ -1284,6 +1284,11 @@ static const DQIntern::Decisions startDec[2] =
   }
 };
 
+// Lambda on luma coefficients in the upper half of a transform's frequencies, with KeepHighBand: distortion there weighs more
+// against bits, so the trellis zeroes fewer of them. It only keeps levels of what the source has, so it is not sharpening.
+// x.7 and x.5 fail on pulsing on film, and cost the second octave more.
+static const double KEEP_HIGH_BAND_LAMBDA = 0.85;
+
 void DepQuant::xQuantDQ( TransformUnit& tu, const CCoeffBuf& srcCoeff, const ComponentID compID, const QpParam& cQP, const double lambda, const Ctx& ctx, TCoeff& absSum, bool enableScalingLists, int* quantCoeff )
 {
   using namespace DQIntern;
@@ -1291,6 +1296,14 @@ void DepQuant::xQuantDQ( TransformUnit& tu, const CCoeffBuf& srcCoeff, const Com
   //===== reset / pre-init =====
   const TUParameters& tuPars  = *m_scansRom->getTUPars( tu.blocks[compID], compID );
   m_quant.initQuantBlock    ( tu, compID, cQP, lambda );
+  const bool keepHighBand = m_keepHighBand && isLuma( compID ) && !enableScalingLists && tu.cs->slice->sliceQp <= KEEP_HIGH_BAND_MAX_SLICE_QP;
+  DQIntern::Quantizer::DistWeight lowBandWeight{}, highBandWeight{};
+  if( keepHighBand )
+  {
+    lowBandWeight = m_quant.getDistWeight();
+    m_quant.initQuantBlock( tu, compID, cQP, lambda * KEEP_HIGH_BAND_LAMBDA );
+    highBandWeight = m_quant.getDistWeight();
+  }
   TCoeffSig*    qCoeff      = tu.getCoeffs( compID ).buf;
   const TCoeff* tCoeff      = srcCoeff.buf;
   const int     numCoeff    = tu.blocks[compID].area();
@@ -1385,6 +1398,11 @@ void DepQuant::xQuantDQ( TransformUnit& tu, const CCoeffBuf& srcCoeff, const Com
   for( int scanIdx = firstTestPos; scanIdx >= 0; scanIdx-- )
   {
     const ScanInfo& scanInfo = tuPars.m_scanInfo[ scanIdx ];
+    if( keepHighBand )
+    {
+      const bool highBand = scanInfo.posX >= tuPars.m_width / 2 || scanInfo.posY >= tuPars.m_height / 2;
+      m_quant.setDistWeight( highBand ? highBandWeight : lowBandWeight );
+    }
     if( enableScalingLists )
     {
       m_quant.initQuantBlock( tu, compID, cQP, lambda, quantCoeff[scanInfo.rasterPos] );
@@ -1678,10 +1696,11 @@ void DepQuant::dequant( const TransformUnit& tu, CoeffBuf& dstCoeff, const Compo
   }
 }
 
-void DepQuant::init( int rdoq, bool useRDOQTS, int thrVal )
+void DepQuant::init( int rdoq, bool useRDOQTS, int thrVal, bool keepHighBand )
 {
   QuantRDOQ2::init( rdoq, useRDOQTS, thrVal );
   m_quant.init( thrVal );
+  m_keepHighBand = keepHighBand;
 }
 
 } // namespace vvenc

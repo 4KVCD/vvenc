@@ -598,6 +598,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
   IStreamToInt8                     toFga                         ( &c->m_fga );
   IStreamToInt8                     toMaxDeltaQP                  ( &c->m_maxDeltaQP );
   IStreamToInt8                     toBIM                         ( &c->m_blockImportanceMapping );
+  IStreamToInt8                     toKeepHighBand                ( &c->m_keepHighBand );
   IStreamToFixedPointU8             toCuTreeStrength              ( &c->m_cuTreeStrength, 5 );
   IStreamToInt8                     toCuTreeBlockSize             ( &c->m_cuTreeBlockSize );
   IStreamToQP                       toQP                          ( &c->m_QP, &c->m_QPFractionVal );
@@ -988,6 +989,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
     ("TMVPMode",                                        c->m_TMVPModeId,                                     "TMVP mode enable(0: off 1: for all slices 2: for certain slices only)")
     ("DepQuant",                                        c->m_DepQuantEnabled,                                "Enable dependent quantization" )
     ("QuantThrVal",                                     c->m_quantThresholdVal,                              "Quantization threshold value for DQ last coefficient search" )
+    ("KeepHighBand",                                    toKeepHighBand,                                      "With DepQuant, keep more fine detail at high rates, on slices up to QP 27: square CUs over 32 whose finest detail a 64-point transform would zero are split, and the trellis drops fewer luma coefficients in the upper half of a transform's frequencies. Costs bytes (0: off, 1: on)" )
     ("SignHideFlag",                                    c->m_SignDataHidingEnabled,                          "Enable sign data hiding" )
     ("MIP",                                             c->m_MIP,                                            "Enable MIP (matrix-based intra prediction)")
     ("FastMIP",                                         c->m_useFastMIP,                                     "Fast encoder search for MIP (matrix-based intra prediction)")

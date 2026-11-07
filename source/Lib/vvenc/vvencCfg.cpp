@@ -649,6 +649,7 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   c->m_maxDeltaQP                              = -1;
 
   c->m_quantThresholdVal                       = -1;
+  c->m_keepHighBand                            = 0;
   c->m_qtbttSpeedUp                            = 1;
   c->m_qtbttSpeedUpMode                        = 0;
   c->m_fastTTSplit                             = 0;
@@ -702,7 +703,6 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   c->m_fga                                     = 0;
   c->m_fgaStrengthVal                          = VVENC_SET_FGA_STRENGTH(1.0);
 
-  memset( c->m_reservedInt8_2, 0, sizeof(c->m_reservedInt8_2) );
   c->m_reservedInt32 = 0;
   memset( c->m_reservedDouble, 0, sizeof(c->m_reservedDouble) );
 
@@ -1988,6 +1988,8 @@ static bool checkCfgParameter( vvenc_config *c )
   vvenc_confirmParameter( c, c->m_AccessUnitDelimiter < 0,   "AccessUnitDelimiter must be >= 0" );
   vvenc_confirmParameter( c, c->m_vuiParametersPresent < 0,  "vuiParametersPresent must be >= 0" );
 
+  vvenc_confirmParameter( c, c->m_keepHighBand < 0 || c->m_keepHighBand > 1, "KeepHighBand must be 0 or 1" );
+  vvenc_confirmParameter( c, c->m_keepHighBand && !c->m_DepQuantEnabled, "KeepHighBand requires DepQuant (its trellis weight lives in dependent quantization)" );
   if( c->m_DepQuantEnabled )
   {
     vvenc_confirmParameter( c, !c->m_RDOQ || !c->m_useRDOQTS, "RDOQ and RDOQTS must be greater 0 if dependent quantization is enabled" );
@@ -3461,6 +3463,7 @@ VVENC_DECL const char* vvenc_get_config_as_string( vvenc_config *c, vvencMsgLeve
       css << "QuantThr:" << (c->m_quantThresholdVal >> 1) << ".5 ";
     else
       css << "QuantThr:" << (c->m_quantThresholdVal >> 1) << " ";
+    css << "KeepHighBand:" << (int) c->m_keepHighBand << " ";
     css << "SelectiveRDQO:" << ( int ) c->m_useSelectiveRDOQ << " ";
 
     css << "\n" << loglvl << "RATE CONTROL CFG: ";

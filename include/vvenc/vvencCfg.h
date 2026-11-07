@@ -800,7 +800,8 @@ typedef struct vvenc_config
 #define VVENC_SET_FGA_STRENGTH(s) ((uint8_t)((s)*64+0.5))
   uint8_t             m_fgaStrengthVal;                                                  // Film grain strength as the fraction of the analysed strength, as a fixed point value with 6 fractional bits (default 1.0, 0 disables the grain)
   int8_t              m_veryLowQPSpeedUp;                                                // -1: auto (on below QP 16; with two rate-control passes the second decides; off with one), 0: off, 1: on
-  int8_t              m_reservedInt8_2[1];
+  int8_t              m_keepHighBand;                                                    // 1: keep more fine detail at high rates (with DepQuant, on slices up to QP 27): a QT split of square CUs over 32 whose
+                                                                                         // finest detail a 64-point transform would zero, and a trellis that keeps more of a luma transform's upper frequencies
   int32_t             m_reservedInt32;
   double              m_reservedDouble[7];
 
