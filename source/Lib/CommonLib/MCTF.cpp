@@ -1560,6 +1560,14 @@ void MCTF::motionEstimationLuma(Array2D<MotionVector> &mvs, const PelStorage &or
         ITT_TASKEND( itt_domain_MCTF_est, itt_handle_est );
         return ret;
       };
+      // Ready only when the line can make progress: it is the first line, or the line above is ahead of it (the test
+      // estimateLumaLn makes first). A blocked line then costs one compare in the pool's scan, instead of a task run that
+      // returns at once and the wake-up of the idle thread after it.
+      static auto ready = []( int, void* task_param )
+      {
+        const EstParams* params = static_cast<const EstParams*>( task_param );
+        return !params->prevLineX || params->blockX.load() < params->prevLineX->load();
+      };
 
       EstParams& cEstParams = EstParamsArray[n];
       cEstParams.blockX = 0;
@@ -1576,7 +1584,7 @@ void MCTF::motionEstimationLuma(Array2D<MotionVector> &mvs, const PelStorage &or
       cEstParams.blockY = blockY;
       cEstParams.bitDepth = bitDepth;
 
-      m_threadPool->addBarrierTask( task, &cEstParams, &taskCounter);
+      m_threadPool->addBarrierTask( task, &cEstParams, &taskCounter, nullptr, {}, ready );
     }
     taskCounter.wait();
   }
