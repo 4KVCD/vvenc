@@ -1,0 +1,75 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): GCC 14 spills 64 q
+# registers in N17's xCalcHAD16x16_neon (four inlined 8x8 transforms interleaved), which makes it slower than master on
+# Neoverse N2. Variant "x": the 8x8 sums helper as an ordinary (not inline) function, as master's xCalcHAD8x8_neon is,
+# in N17 (NEON) and N19 (SVE2). Commits: HEAD~1 = N19, HEAD~2 = N17, HEAD~3 = master. Per-call bench, two interleaved
+# rounds, checksums must match; plus GCC's stack spills. Every step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "SATD 16x16 on N2: master / N17 / N19 / out-of-line helper (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Trees
+        shell: bash
+        run: |
+          cp .github/sve-check/bench_had_sve.cpp /tmp/bench_had_sve.cpp
+          git worktree add -q /tmp/master HEAD~3
+          git worktree add -q /tmp/n17 HEAD~2
+          git worktree add -q /tmp/n19 HEAD~1
+          git worktree add -q /tmp/n17x HEAD~2
+          git worktree add -q /tmp/n19x HEAD~1
+          python3 - <<'EOF'
+          for f, name in [("/tmp/n17x/source/Lib/CommonLib/arm/neon/RdCost_neon.cpp", "had8x8Sums_neon"),
+                          ("/tmp/n19x/source/Lib/CommonLib/arm/sve2/RdCost_sve2.cpp", "had8x8Sums_sve2")]:
+              s = open(f).read()
+              old = "static inline void " + name + "("
+              print(f, "helpers:", s.count(old))
+              open(f, "w").write(s.replace(old, "void " + name + "("))
+          EOF
+      - name: Build
+        shell: bash
+        run: |
+          for t in /tmp/master /tmp/n17 /tmp/n19 /tmp/n17x /tmp/n19x; do
+            cmake -S $t -B $t/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON > /dev/null
+            cmake --build $t/build --target vvenc > /dev/null || echo "build failed: $t"
+            g++-14 -O2 -std=c++14 -I$t/source/Lib -I$t/source/Lib/CommonLib -I$t/include -I$t/build -I$t/build/include \
+                /tmp/bench_had_sve.cpp $t/build/lib/libvvenc.a -lpthread -o $t/bench_had || echo "bench link failed: $t"
+          done
+      - name: Bench (two interleaved rounds)
+        shell: bash
+        run: |
+          for round in 1 2; do
+            for arm in "master NEON" "n17 NEON" "n17x NEON" "n17 SVE2" "n19 SVE2" "n19x SVE2"; do
+              set -- $arm; echo "== round $round: $1 $2"; [ -x /tmp/$1/bench_had ] || echo "MISSING /tmp/$1/bench_had"; /tmp/$1/bench_had $2 | grep -E "8x8 |16x16|32x32|128x128" || true
+            done
+          done
+      - name: GCC 14 stack spills in the 16x16 kernels (no LTO)
+        shell: bash
+        run: |
+          for t in n17x n19x; do
+            python3 - $t <<'EOF' > /tmp/cmd_$t.sh || true
+          import json, sys
+          t = sys.argv[1]
+          for e in json.load(open(f"/tmp/{t}/build/compile_commands.json")):
+              if e["file"].endswith(("arm/neon/RdCost_neon.cpp", "arm/sve2/RdCost_sve2.cpp")):
+                  c = e["command"].replace(" -flto=auto", "").replace(" -flto", "").replace(" -fno-fat-lto-objects", "")
+                  o = "/tmp/" + t + "_" + e["file"].split("/")[-1] + ".o"
+                  print("cd " + e["directory"] + " && " + c.split(" -o ")[0] + " -fno-lto -o " + o + " -c " + e["file"])
+          EOF
+            bash /tmp/cmd_$t.sh || true
+          done
+          for o in /tmp/n17x_RdCost_neon.cpp.o /tmp/n19x_RdCost_sve2.cpp.o; do
+            echo "== $o"
+            objdump -d --no-show-raw-insn -C $o | awk '/^[0-9a-f]+ <.*>:$/{name=$0} /sp/ && /(str|stp|ldr|ldp)[ \t]+q/{n[name]++} END{for(k in n) print n[k], k}' | grep -iE "HAD16x16|HAD8x8|had8x8Sums|xGetHADs" || true
+          done
