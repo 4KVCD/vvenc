@@ -5,7 +5,7 @@ import sys
 n = int(sys.argv[1])
 inp, out = sys.stdin.buffer, sys.stdout.buffer
 header = inp.readline()
-fields = dict((f[0], f[1:]) for f in header.split()[1:])
+fields = dict((f[:1], f[1:]) for f in header.split()[1:])
 frame = int(fields[b"W"]) * int(fields[b"H"]) * 3 // 2
 out.write(header)
 for _ in range(n):
