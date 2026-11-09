@@ -69,11 +69,63 @@ POSSIBILITY OF SUCH DAMAGE.
 
 namespace vvenc
 {
+// The error of a block of up to 8 rows (w a multiple of 8, at most 64), summed in full with one reduction at the end.
+static int motionErrorLumaIntShort_sve( const Pel* org, const ptrdiff_t origStride, const Pel* buf,
+                                        const ptrdiff_t buffStride, const int w, int h )
+{
+  int64x2_t acc1 = vdupq_n_s64( 0 );
+  int64x2_t acc2 = vdupq_n_s64( 0 );
+  do
+  {
+    int x1 = 0;
+    do
+    {
+      int16x8_t o1 = vld1q_s16( org + 0 * origStride + x1 );
+      int16x8_t b1 = vld1q_s16( buf + 0 * buffStride + x1 );
+      int16x8_t o2 = vld1q_s16( org + 1 * origStride + x1 );
+      int16x8_t b2 = vld1q_s16( buf + 1 * buffStride + x1 );
+      int16x8_t o3 = vld1q_s16( org + 2 * origStride + x1 );
+      int16x8_t b3 = vld1q_s16( buf + 2 * buffStride + x1 );
+      int16x8_t o4 = vld1q_s16( org + 3 * origStride + x1 );
+      int16x8_t b4 = vld1q_s16( buf + 3 * buffStride + x1 );
+
+      int16x8_t diff1 = vabdq_s16( o1, b1 );
+      int16x8_t diff2 = vabdq_s16( o2, b2 );
+      int16x8_t diff3 = vabdq_s16( o3, b3 );
+      int16x8_t diff4 = vabdq_s16( o4, b4 );
+
+      acc1 = vvenc_sdotq_s16( acc1, diff1, diff1 );
+      acc2 = vvenc_sdotq_s16( acc2, diff2, diff2 );
+      acc1 = vvenc_sdotq_s16( acc1, diff3, diff3 );
+      acc2 = vvenc_sdotq_s16( acc2, diff4, diff4 );
+
+      x1 += 8;
+    } while( x1 != w );
+
+    org += 4 * origStride;
+    buf += 4 * buffStride;
+    h -= 4;
+  } while( h != 0 );
+
+  return ( int32_t )vaddvq_s64( vaddq_s64( acc1, acc2 ) );
+}
+
 int motionErrorLumaInt_sve( const Pel* org, const ptrdiff_t origStride, const Pel* buf, const ptrdiff_t buffStride,
                             const int w, int h, const int besterror )
 {
   CHECKD( w % 8 != 0, "Width must be a multiple of eight" );
   CHECKD( h % 4 != 0, "Height must be a multiple of four" );
+  CHECKD( w > 64, "Width must be at most 64" );
+
+  // Like every MCTF error kernel, this returns the exact error when it is not above besterror and a value above
+  // besterror otherwise: the callers only test error < besterror. Blocks of up to 8 rows are summed in full with one
+  // reduction at the end, since the early exit after the first 4 rows rarely saves enough to pay for the reduction and
+  // the branch. The sum cannot overflow: at most 64 x 8 samples of at most 10 bits. Taller blocks check the running
+  // error after every 4 rows.
+  if( h <= 8 )
+  {
+    return motionErrorLumaIntShort_sve( org, origStride, buf, buffStride, w, h );
+  }
 
   int error = 0;
   do
