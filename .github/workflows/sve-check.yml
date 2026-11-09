@@ -1,0 +1,54 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request), Neoverse N2 / GCC 14,
+# SVE / SVE2 built off so the NEON kernels run. (1) N25: the 16-wide fused 2-D luma filter as two 8-wide strips
+# (HEAD = N7 + N25 + this check) against N7 (HEAD~1) and N10 (sve-check-n10b~1); bench_n25 at phases 4, 12, 8, widths 8
+# and 16, heights 4 to 64, isLast 0 / 1; checksums must match. (2) N1 (#900) against master through the libraries'
+# DF_SAD pointers (the earlier bench compiled N1's kernel into the bench itself). Two interleaved rounds each. Every
+# step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N25 2-D filters and N1 SAD on N2 (GCC 14, NEON, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Trees and libraries
+        shell: bash
+        run: |
+          cp .github/sve-check/*.cpp /tmp/
+          git worktree add -q /tmp/n25 HEAD
+          git worktree add -q /tmp/n7 HEAD~1
+          git fetch -q --no-tags --depth=2 origin sve-check-n10b && git worktree add -q /tmp/n10 FETCH_HEAD~1
+          git fetch -q --no-tags --depth=2 origin sve-check-audit1b && git worktree add -q /tmp/master FETCH_HEAD~1
+          git fetch -q --no-tags --depth=1 origin neon-sad-acc4 && git worktree add -q /tmp/n1 FETCH_HEAD
+          for t in n25 n7 n10 master n1; do git -C /tmp/$t log --oneline -1; done
+          for t in n25 n7 n10 master n1; do
+            cmake -S /tmp/$t -B /tmp/$t/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+                  -DVVENC_ENABLE_ARM_SIMD_SVE=OFF -DVVENC_ENABLE_ARM_SIMD_SVE2=OFF > /dev/null
+            cmake --build /tmp/$t/build --target vvenc > /dev/null || echo "build failed: $t"
+          done
+          inc() { echo "-I$1/source/Lib -I$1/source/Lib/CommonLib -I$1/include -I$1/build -I$1/build/include"; }
+          for t in n25 n7 n10; do
+            g++-14 -O3 -std=c++14 -DNDEBUG -DTARGET_SIMD_ARM=1 $(inc /tmp/$t) /tmp/bench_n25.cpp /tmp/$t/build/lib/libvvenc.a \
+                -lpthread -o /tmp/$t/bench || echo "link failed: $t"
+          done
+          for t in master n1; do
+            g++-14 -O3 -std=c++14 -DNDEBUG -DTARGET_SIMD_ARM=1 $(inc /tmp/$t) /tmp/bench_sad_ptr.cpp /tmp/$t/build/lib/libvvenc.a \
+                -lpthread -o /tmp/$t/bench || echo "link failed: $t"
+          done
+      - name: Bench
+        shell: bash
+        run: |
+          for round in 1 2; do
+            for t in n7 n10 n25; do echo "== filters round $round: $t"; /tmp/$t/bench || true; done
+            for t in master n1; do echo "== SAD round $round: $t"; /tmp/$t/bench NEON || true; done
+          done
