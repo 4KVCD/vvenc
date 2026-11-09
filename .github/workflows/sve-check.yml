@@ -1,0 +1,65 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N27b (HEAD~1: SVE MCTF integer motion error sums blocks of up to 8 rows in full) against master (HEAD~2), SVE on:
+# unit test -t MCTF at --SIMD=SVE; one mutant (the short path drops its second 4-row group) must fail it; MCTF integer
+# motion error through each LIBRARY's own pointer (MCTF(true).m_motionErrorLumaInt8, the SVE kernel), luma of frames 0
+# and 4 of three Xiph 1080p50 clips streamed from media.xiph.org (curl | y4m_luma.py | bench, nothing on disk);
+# per clip: master, N27, N27, master; checksums must match.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N27b SVE MCTF integer error on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+          git worktree add -q /tmp/base HEAD~2
+          git worktree add -q /tmp/n27 HEAD~1
+          for t in base n27; do
+            echo "$t $(git -C /tmp/$t log --oneline -1 | cut -c1-70)"
+            b=/tmp/$t/build
+            cmake -S /tmp/$t -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /tmp/cfg_$t.log || echo "configure failed: $t"
+            grep -i "sve" /tmp/cfg_$t.log | head -3 || true
+            cmake --build $b --target vvenc > /dev/null || echo "build failed: $t"
+            defs=$(python3 -c "import json,shlex; e=[x for x in json.load(open('$b/compile_commands.json')) if x['file'].endswith('CommonLib/MCTF.cpp')][0]; print(' '.join(t for t in shlex.split(e['command']) if t.startswith('-D')))")
+            g++-14 -O3 -std=gnu++14 $defs -I/tmp/$t/source/Lib -I/tmp/$t/source/Lib/CommonLib -I/tmp/$t/include -I$b -I$b/include \
+                .github/sve-check/bench_mctf_lib.cpp $b/lib/libvvenc.a -lpthread -o /tmp/bench_$t || echo "link failed: $t"
+            echo "$t: motionErrorLumaInt_sve in bench: $(nm -C /tmp/bench_$t | grep -c motionErrorLumaInt_sve || true)"
+          done
+          echo "defs: $defs"
+      - name: Bench (per clip, base n27 n27 base)
+        shell: bash
+        run: |
+          for clip in crowd_run old_town_cross park_joy; do
+            for t in base n27 n27 base; do
+              echo "== $clip $t"
+              { curl -sL https://media.xiph.org/video/derf/y4m/${clip}_1080p50.y4m || true; } | python3 .github/sve-check/y4m_luma.py | /tmp/bench_$t || true
+            done
+          done
+      - name: Unit test and mutant (SVE)
+        shell: bash
+        run: |
+          F=/tmp/n27/source/Lib/CommonLib/arm/sve/MCTF_sve.cpp; cp $F /tmp/orig.cpp
+          for m in none short; do
+            cp /tmp/orig.cpp $F
+            [ $m != none ] && sed -i 's/^      h -= 4;$/      h -= 8;/' $F
+            echo "mutant $m: $(diff /tmp/orig.cpp $F | grep -c '^>') changed lines"
+            cmake --build /tmp/n27/build --target vvenc_unit_test > /dev/null || echo "build failed: $m"
+            ut=$(find /tmp/n27/build -name vvenc_unit_test -type f | head -1)
+            rc=0; timeout 900 $ut -t MCTF --SIMD=SVE > /tmp/ut.log 2>&1 || rc=$?; eval "rc_$m=$rc"
+            echo "mutant $m: rc=$rc, $(grep -c 'motionErrorLumaInt8' /tmp/ut.log) int8 lines, $(grep -ci fail /tmp/ut.log) fail lines"
+            grep -iE "passed|SIMD" /tmp/ut.log | tail -2 || true
+          done
+          [ "$rc_none" = 0 ] && [ "$rc_short" != 0 ] && echo "unit test passes, mutant caught" || { echo "UNIT TEST CHECK FAILED"; exit 1; }
