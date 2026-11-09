@@ -1,0 +1,53 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N39 (HEAD~1: N37 = #908 with the final-output 4x4 filter out of line) against #908 (HEAD~2) with GCC 14 and the NEON
+# kernels forced (as on NEON-only Arm servers): vvenc_unit_test -t InterPred at --SIMD=NEON on N37; bench_affine
+# (per-sub-block path vs the CU kernels of one library, BENCH_NEON=1) for both trees, rounds A B B A.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N39 NEON affine CU filter out of line, GCC 14 (ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+          git worktree add -q /tmp/b908 HEAD~2
+          git worktree add -q /tmp/n37 HEAD~1
+          for t in b908 n37; do
+            echo "$t $(git -C /tmp/$t log --oneline -1 | cut -c1-70)"
+            b=/tmp/$t/build
+            cmake -S /tmp/$t -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null || echo "configure failed: $t"
+            cmake --build $b --target vvenc > /dev/null || echo "build failed: $t"
+            defs=$(python3 -c "import json,shlex; e=[x for x in json.load(open('$b/compile_commands.json')) if x['file'].endswith('CommonLib/InterPrediction.cpp')][0]; print(' '.join(t for t in shlex.split(e['command']) if t.startswith('-D')))")
+            g++-14 -O3 -std=gnu++14 $defs -I/tmp/$t/source/Lib -I/tmp/$t/source/Lib/CommonLib -I/tmp/$t/include -I$b -I$b/include \
+                .github/sve-check/bench_affine.cpp $b/lib/libvvenc.a -lpthread -o /tmp/bench_$t || echo "link failed: $t"
+          done
+          cmake --build /tmp/n37/build --target vvenc_unit_test > /dev/null || echo "build failed: unit/app"
+          nm -C /tmp/n37/build/lib/libvvenc.a 2>/dev/null | grep -c "simdFilter4x4_N6_last_neon" || true
+          for t in b908 n37; do echo "$t: calls to simdFilter4x4_N6_last_neon $(objdump -d /tmp/$t/build/lib/libvvenc.a 2>/dev/null | grep -cE 'bl\s.*simdFilter4x4_N6_last_neon' || true)"; done
+      - name: Unit test (N37, NEON)
+        shell: bash
+        run: |
+          ut=$(find /tmp/n37/build -name vvenc_unit_test -type f | head -1)
+          for s in NEON; do
+            rc=0; timeout 900 $ut -t InterPred --SIMD=$s > /tmp/ut.log 2>&1 || rc=$?
+            echo "--SIMD=$s rc=$rc"; grep -iE "SIMD=|affine|passed|fail" /tmp/ut.log | tail -4 || true
+            [ $rc = 0 ] || fails=1
+          done
+          [ -z "${fails:-}" ] || { echo "UNIT TEST FAILED"; exit 1; }
+      - name: Bench (b908 n37 n37 b908, NEON)
+        shell: bash
+        run: |
+          for t in b908 n37 n37 b908; do echo "== $t"; BENCH_NEON=1 /tmp/bench_$t | grep -E "simd level|bd 10|equal|DIFF" || true; done
