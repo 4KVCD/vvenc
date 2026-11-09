@@ -1,0 +1,63 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N31 (HEAD~1: SVE affine luma CU kernels with the SVE 4x4 filter) against #873 (HEAD~2), SVE on: vvenc_unit_test
+# -t InterPred at --SIMD=SVE and NEON on N31; bench_affine (per-sub-block path vs the CU kernels of one library, A B B A)
+# for both trees, two rounds; md5 of one preset slow encode (crowd_run 1080p50, 5 pictures streamed from media.xiph.org,
+# nothing on disk) at --SIMD=SVE and NEON from the N31 binary.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N31 SVE affine CU kernels on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+          git worktree add -q /tmp/b873 HEAD~2
+          git worktree add -q /tmp/n31 HEAD~1
+          for t in b873 n31; do
+            echo "$t $(git -C /tmp/$t log --oneline -1 | cut -c1-70)"
+            b=/tmp/$t/build
+            cmake -S /tmp/$t -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null || echo "configure failed: $t"
+            cmake --build $b --target vvenc > /dev/null || echo "build failed: $t"
+            defs=$(python3 -c "import json,shlex; e=[x for x in json.load(open('$b/compile_commands.json')) if x['file'].endswith('CommonLib/InterPrediction.cpp')][0]; print(' '.join(t for t in shlex.split(e['command']) if t.startswith('-D')))")
+            g++-14 -O3 -std=gnu++14 $defs -I/tmp/$t/source/Lib -I/tmp/$t/source/Lib/CommonLib -I/tmp/$t/include -I$b -I$b/include \
+                .github/sve-check/bench_affine.cpp $b/lib/libvvenc.a -lpthread -o /tmp/bench_$t || echo "link failed: $t"
+          done
+          cmake --build /tmp/n31/build --target vvenc_unit_test vvencFFapp > /dev/null || echo "build failed: unit/app"
+          nm -C /tmp/n31/build/lib/libvvenc.a 2>/dev/null | grep -c "affineLumaCU_arm.*simdFilter4x4_N6_sve" || true
+      - name: Unit test (N31, SVE and NEON)
+        shell: bash
+        run: |
+          ut=$(find /tmp/n31/build -name vvenc_unit_test -type f | head -1)
+          for s in SVE NEON; do
+            rc=0; timeout 900 $ut -t InterPred --SIMD=$s > /tmp/ut.log 2>&1 || rc=$?
+            echo "--SIMD=$s rc=$rc"; grep -iE "SIMD=|affine|passed|fail" /tmp/ut.log | tail -4 || true
+            [ $rc = 0 ] || fails=1
+          done
+          [ -z "${fails:-}" ] || { echo "UNIT TEST FAILED"; exit 1; }
+      - name: Bench (b873 n31 n31 b873)
+        shell: bash
+        run: |
+          for t in b873 n31 n31 b873; do echo "== $t"; /tmp/bench_$t | grep -E "simd level|bd 10|equal|DIFF" || true; done
+      - name: md5 SVE vs NEON (N31, preset slow)
+        shell: bash
+        run: |
+          app=$(find /tmp/n31/build -name vvencFFapp -type f | head -1)
+          for s in SVE NEON; do
+            { curl -sL https://media.xiph.org/video/derf/y4m/crowd_run_1080p50.y4m || true; } | python3 .github/sve-check/y4m_head.py 5 \
+              | $app -i - --y4m=1 --preset slow -f 5 -t 4 --SIMD=$s -b /tmp/out_$s.266 > /tmp/enc_$s.log 2>&1 || echo "encode failed: $s"
+            echo "$s $(md5sum < /tmp/out_$s.266) $(stat -c %s /tmp/out_$s.266) bytes"
+          done
+          if [ -s /tmp/out_SVE.266 ] && cmp -s /tmp/out_SVE.266 /tmp/out_NEON.266; then echo "md5 MATCH"; else echo "md5 MISMATCH or empty"; exit 1; fi
