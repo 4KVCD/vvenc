@@ -1,0 +1,50 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14
+# per-call audit of two NEON speed-ups benched only on Apple M1 / clang so far.
+# N12: master's and N12's calcSaoStatisticsBo_neon pasted into bench_n12s.cpp (self-contained, synthetic pictures).
+# N13 (HEAD~1): bench_n13.cpp linked with HEAD~1's library compares, per ALF block, the 16-bin kernel for every block
+# (before) with the equal-bins dispatch (after); built twice: SVE off (NEON 16-bin kernel) and SVE on (the SVE 16-bin
+# kernel replaces the NEON one, as on N2; the equal-bins kernel is NEON in both). Two rounds; statistics must match.
+# Every step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N12 / N13 audit on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+          git worktree add -q /tmp/n13 HEAD~1
+          git -C /tmp/n13 log --oneline -1
+          g++-14 -O3 -std=c++17 -Wall .github/sve-check/bench_n12s.cpp -o /tmp/bench_n12s || echo "n12 build failed"
+          inc() { echo "-I$1/source/Lib -I$1/source/Lib/CommonLib -I$1/source/Lib/CommonLib/arm -I$1/source/Lib/CommonLib/arm/neon -I$1/include -I$1/build -I$1/build/include"; }
+          for v in nosve sve; do
+            opt=""; [ $v = nosve ] && opt="-DVVENC_ENABLE_ARM_SIMD_SVE=OFF -DVVENC_ENABLE_ARM_SIMD_SVE2=OFF"
+            b=/tmp/n13/build_$v
+            cmake -S /tmp/n13 -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $opt > /dev/null || echo "configure failed: $v"
+            cmake --build $b --target vvenc > /dev/null || echo "build failed: $v"
+            # the library's own -D flags for the ALF encoder file, so that the bench sees the same class layout
+            defs=$(python3 -c "import json,shlex,sys; e=[x for x in json.load(open('$b/compile_commands.json')) if x['file'].endswith('EncoderLib/EncAdaptiveLoopFilter.cpp')][0]; print(' '.join(t for t in shlex.split(e['command']) if t.startswith('-D')))")
+            echo "$v defs: $defs"
+            g++-14 -O3 -std=gnu++14 $defs $(inc /tmp/n13) -I$b -I$b/include .github/sve-check/bench_n13.cpp \
+                $b/lib/libvvenc.a -lpthread -o /tmp/bench_n13_$v || echo "n13 link failed: $v"
+          done
+      - name: Bench (two rounds)
+        shell: bash
+        run: |
+          for round in 1 2; do
+            echo "== round $round: n12"; /tmp/bench_n12s || true
+            for v in nosve sve; do echo "== round $round: n13 $v"; /tmp/bench_n13_$v || true; done
+          done
