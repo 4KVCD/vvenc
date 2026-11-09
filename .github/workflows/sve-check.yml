@@ -1,0 +1,61 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): per-call benches of
+# open NEON PRs that were only measured on Apple M1 / clang, now on Neoverse N2 / GCC 14: N1 (#900, SAD 32-128 wide),
+# N3 (#902, SATD normalization), N9 (#910, 8-tap zero end tap), N11 (#911, forward DCT-II 8). Each against master
+# (a455d51e), two rounds A B B A where the tool does not already interleave. SVE / SVE2 are built off, so the NEON
+# kernels run (on N2 SVE overrides some of them). Every step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N1 / N3 / N9 / N11 per call on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Trees and libraries
+        shell: bash
+        run: |
+          cp .github/sve-check/*.cpp /tmp/
+          git worktree add -q /tmp/master HEAD~1
+          for p in "n1 36ffb675" "n3 e23099bb" "n9 9466cf96" "n11 2b22790e"; do
+            set -- $p
+            sha=$(git ls-remote origin | awk -v s=$2 'index($1, s) == 1 && !f {print $1; f = 1}')
+            echo "$1: $sha"; git fetch -q --no-tags origin "$sha" || echo "fetch failed: $1"
+            git worktree add -q /tmp/$1 $2 || echo "worktree failed: $1 $2"
+            git -C /tmp/$1 log --oneline -1
+          done
+          git -C /tmp/master log --oneline -1
+          for t in master n3 n9 n11; do
+            cmake -S /tmp/$t -B /tmp/$t/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+                  -DVVENC_ENABLE_ARM_SIMD_SVE=OFF -DVVENC_ENABLE_ARM_SIMD_SVE2=OFF > /dev/null
+            cmake --build /tmp/$t/build --target vvenc > /dev/null || echo "build failed: $t"
+          done
+      - name: Benches
+        shell: bash
+        run: |
+          inc() { echo "-I$1/source/Lib -I$1/source/Lib/CommonLib -I$1/source/Lib/CommonLib/arm -I$1/include -I$1/build -I$1/build/include"; }
+          M=/tmp/master
+          awk '/^static inline Distortion xGetSAD_generic_neon\(/{f=1} f{print} f&&/^}$/{exit}' \
+            /tmp/n1/source/Lib/CommonLib/arm/neon/RdCost_neon.cpp > /tmp/n1_kernel.inc
+          g++-14 -O3 -std=c++14 -DNDEBUG -DTARGET_SIMD_ARM=1 -I/tmp $(inc $M) -include $M/source/Lib/CommonLib/arm/neon/sum_neon.h \
+              /tmp/bench_n1.cpp $M/build/lib/libvvenc.a -lpthread -o /tmp/b_n1 || echo "link failed: n1"
+          for n in n3 n9 n11; do
+            for t in master $n; do
+              g++-14 -O3 -std=c++14 -DNDEBUG -DTARGET_SIMD_ARM=1 $(inc /tmp/$t) /tmp/bench_$n.cpp /tmp/$t/build/lib/libvvenc.a -lpthread \
+                  -o /tmp/b_${n}_$t || echo "link failed: $n $t"
+            done
+          done
+          echo "===== N1 (master pointer vs #900 kernel in one binary)"; /tmp/b_n1 || true
+          echo "===== N3 hashes"; /tmp/b_n3_master | grep hash || true; /tmp/b_n3_n3 | grep hash || true
+          for r in A B B A; do echo "-- N3 $r"; if [ $r = A ]; then /tmp/b_n3_master t || true; else /tmp/b_n3_n3 t || true; fi; done
+          for n in n9 n11; do
+            for r in A B B A; do echo "===== $n $r"; if [ $r = A ]; then /tmp/b_${n}_master || true; else /tmp/b_${n}_$n || true; fi; done
+          done
