@@ -1,6 +1,6 @@
-# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): the SVE kernels,
-# which the regular CI does not build (GCC 13 lacks arm_neon_sve_bridge.h), tested and timed on an SVE machine.
-# Every step reports and none fails the job: the log is read by hand.
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): one mutant per new SVE
+# kernel of N15 (SSE, RdCost_sve.cpp) and N18 (MCTF column, MCTF_sve.cpp); each drops lane 7's square and must make
+# its unit test fail at --SIMD=SVE. Every step reports and none fails the job: the log is read by hand.
 name: SVE check
 
 on:
@@ -9,42 +9,36 @@ on:
 
 jobs:
   sve:
-    name: "MCTF and RdCost unit tests, column and SSE benches, NEON / SVE / SVE2 (GCC 14, ubuntu-24.04-arm)"
+    name: "Mutants of the SVE SSE and MCTF column kernels (GCC 14, ubuntu-24.04-arm)"
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: CPU
-        run: lscpu | grep -i -E 'model name|flags' || true
       - name: Install GCC 14
         run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
       - name: Build
         shell: bash
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
-                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 | tee cmake.log
-          grep -i "sve" cmake.log || true
-          cmake --build build --target vvenc vvenc_unit_test || true
-          g++-14 -O2 -std=c++14 -Isource/Lib -Iinclude -Ibuild -Ibuild/include \
-              .github/sve-check/bench_mctf_column.cpp build/lib/libvvenc.a -lpthread -o bench_column || true
-          g++-14 -O2 -std=c++14 -Isource/Lib -Iinclude -Ibuild -Ibuild/include \
-              .github/sve-check/bench_sse.cpp build/lib/libvvenc.a -lpthread -o bench_sse || true
-          find build -name vvenc_unit_test -type f
-      - name: Unit tests (MCTF, RdCost)
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null
+          cmake --build build --target vvenc_unit_test > /dev/null || true
+      - name: Mutant N15 (RdCost SSE kernel, lane 7 dropped; must fail)
         shell: bash
         run: |
+          f=source/Lib/CommonLib/arm/sve/RdCost_sve.cpp
+          sed -i 's/  return vvenc_sdotq_s16( acc, diff, diff );/  return vvenc_sdotq_s16( acc, diff, vsetq_lane_s16( 0, diff, 7 ) );/' $f
+          grep -c "vsetq_lane_s16( 0, diff, 7 )" $f || true
+          cmake --build build --target vvenc_unit_test > /dev/null || true
           ut=$(find build -name vvenc_unit_test -type f | head -1)
-          for t in MCTF RdCost; do
-            for simd in SVE2 SVE NEON; do
-              echo "== $t $simd"
-              $ut --SIMD=$simd --testcase=$t --seed=1 > ut_${t}_$simd.log 2>&1; echo "exit $?"
-              grep -i -E "failed" ut_${t}_$simd.log | head -20 || true; tail -1 ut_${t}_$simd.log
-            done
-          done
-      - name: Bench (three rounds, alternating)
+          rc=0; $ut --SIMD=SVE --testcase=RdCost --seed=1 > ut_m15.log 2>&1 || rc=$?
+          echo "mutant N15 exit $rc (must be non-zero)"; grep -i "failed" ut_m15.log | head -3 || true
+          git checkout -- $f
+      - name: Mutant N18 (MCTF column kernel, lane 7 dropped; must fail)
         shell: bash
         run: |
-          for round in 1 2 3; do
-            for simd in NEON SVE; do
-              echo "== $simd, round $round"; ./bench_column $simd || true; ./bench_sse $simd || true
-            done
-          done
+          f=source/Lib/CommonLib/arm/sve/MCTF_sve.cpp
+          sed -i 's/  void add( const int16x8_t diff ) { acc = vvenc_sdotq_s16( acc, diff, diff ); }/  void add( const int16x8_t diff ) { acc = vvenc_sdotq_s16( acc, diff, vsetq_lane_s16( 0, diff, 7 ) ); }/' $f
+          grep -c "vsetq_lane_s16( 0, diff, 7 )" $f || true
+          cmake --build build --target vvenc_unit_test > /dev/null || true
+          ut=$(find build -name vvenc_unit_test -type f | head -1)
+          rc=0; $ut --SIMD=SVE --testcase=MCTF --seed=1 > ut_m18.log 2>&1 || rc=$?
+          echo "mutant N18 exit $rc (must be non-zero)"; grep -i "failed" ut_m18.log | head -3 || true
