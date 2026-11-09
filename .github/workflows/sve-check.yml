@@ -1,0 +1,39 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N24 audit of #903 (N4, HEAD~1) against master (HEAD~2): fastInvCore through each library's g_tCoeffOps pointer (SVE
+# overrides only the forward core, so N2 runs this NEON kernel). bench_n4_lib prints a hash of every output over 52266
+# cases (must be equal for both libraries) and the best of 5 times per call; runs master n4 n4 master.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N24 audit: #903 inverse transform core vs master on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          git worktree add -q /tmp/master HEAD~2
+          git worktree add -q /tmp/n4 HEAD~1
+          for t in master n4; do
+            echo "$t $(git -C /tmp/$t log --oneline -1 | cut -c1-70)"
+            b=/tmp/$t/build
+            cmake -S /tmp/$t -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null || echo "configure failed: $t"
+            cmake --build $b --target vvenc > /dev/null || echo "build failed: $t"
+            defs=$(python3 -c "import json,shlex; e=[x for x in json.load(open('$b/compile_commands.json')) if x['file'].endswith('CommonLib/TrQuant_EMT.cpp')][0]; print(' '.join(t for t in shlex.split(e['command']) if t.startswith('-D')))")
+            g++-14 -O3 -std=gnu++14 $defs -I/tmp/$t/source/Lib -I/tmp/$t/source/Lib/CommonLib -I/tmp/$t/include -I$b -I$b/include \
+                .github/sve-check/bench_n4_lib.cpp $b/lib/libvvenc.a -lpthread -o /tmp/bench_$t || echo "link failed: $t"
+          done
+      - name: Bench (master n4 n4 master)
+        shell: bash
+        run: |
+          for t in master n4 n4 master; do echo "== $t"; /tmp/bench_$t || echo "bench failed: $t"; done
