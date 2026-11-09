@@ -1,0 +1,67 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request), Neoverse N2 / GCC 14.
+# N25 + chroma: the NEON 16-wide fused 2-D filters (luma 8-tap and chroma 4-tap) as two 8-wide strips, on #908's
+# branch (neon-filter-taps); built with SVE off so that the NEON kernels run. N26 + chroma: the same in the SVE file,
+# on master (HEAD~1 = master + N26, HEAD~2 = master), SVE on. Unit test of each changed tree at its level, then the luma
+# (bench_n25) and chroma (bench_n25c) per-call benches, two interleaved rounds; checksums must match within each pair.
+# Every step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N25 / N26 2-D filters incl. chroma on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Trees
+        shell: bash
+        run: |
+          cp .github/sve-check/bench_n25.cpp .github/sve-check/bench_n25c.cpp /tmp/
+          git worktree add -q /tmp/master HEAD~2
+          git worktree add -q /tmp/n26 HEAD~1
+          git fetch -q --depth=1 origin neon-filter-taps
+          git worktree add -q /tmp/n7 FETCH_HEAD
+          git worktree add -q /tmp/n25 FETCH_HEAD
+          cp .github/sve-check/n25c/InterpolationFilter_neon.cpp /tmp/n25/source/Lib/CommonLib/arm/neon/
+          cp .github/sve-check/n25c/InterpolationFilter_neon.h /tmp/n25/source/Lib/CommonLib/arm/
+          for t in master n26 n7 n25; do echo "$t $(git -C /tmp/$t log --oneline -1)"; git -C /tmp/$t diff --stat; done
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+      - name: Build
+        shell: bash
+        run: |
+          inc() { echo "-I$1/source/Lib -I$1/source/Lib/CommonLib -I$1/include -I$1/build -I$1/build/include"; }
+          for t in master n26 n7 n25; do
+            sve=""; case $t in n7|n25) sve="-DVVENC_ENABLE_ARM_SIMD_SVE=OFF -DVVENC_ENABLE_ARM_SIMD_SVE2=OFF";; esac
+            cmake -S /tmp/$t -B /tmp/$t/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 $sve > /dev/null
+            targets=vvenc; case $t in n26|n25) targets="vvenc vvenc_unit_test";; esac
+            cmake --build /tmp/$t/build --target $targets > /dev/null || echo "build failed: $t"
+            for b in bench_n25 bench_n25c; do
+              g++-14 -O3 -std=c++14 -DNDEBUG -DTARGET_SIMD_ARM=1 $(inc /tmp/$t) /tmp/$b.cpp /tmp/$t/build/lib/libvvenc.a \
+                  -lpthread -o /tmp/$t/$b || echo "link failed: $t $b"
+            done
+          done
+      - name: Unit tests (N26 at SVE, N25 at NEON)
+        shell: bash
+        run: |
+          for t in n26 n25; do
+            simd=SVE; [ $t = n25 ] && simd=NEON
+            ut=$(find /tmp/$t/build -name vvenc_unit_test -type f | head -1)
+            rc=0; $ut --SIMD=$simd > /tmp/ut_$t.log 2>&1 || rc=$?
+            echo "$t $simd rc=$rc"; grep -iE "passed|fail" /tmp/ut_$t.log | tail -3 || true
+          done
+      - name: Bench (two interleaved rounds)
+        shell: bash
+        run: |
+          for round in 1 2; do
+            for b in bench_n25 bench_n25c; do
+              for t in n7 n25 master n26; do echo "== round $round: $t $b"; /tmp/$t/$b || true; done
+            done
+          done
