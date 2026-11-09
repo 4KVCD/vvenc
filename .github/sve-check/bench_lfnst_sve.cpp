@@ -1,6 +1,24 @@
 // LFNST check and per-call bench (fork-only SVE check, not for upstream), argv[1] = SIMD level (SCALAR, NEON, SVE):
 // the TrQuant LFNST pointers at that level on every mode, index, size and zero-out size with inputs of 9, 16 and 18
 // bits; prints a hash of all outputs (must equal SCALAR's) and the time per call on residual-like inputs, best of 5.
+// the standard headers first: "#define private public" must not reach them (libstdc++'s <sstream> breaks)
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <cstring>
+#include <deque>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <list>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
 #define private public
 #include "CommonLib/TrQuant.h"
 #undef private
