@@ -107,7 +107,7 @@ static inline int16x8x2_t filter_horiz_16x1_N8_sve( Pel const* src, int16x8_t ch
 }
 
 template<bool isLast>
-static ALWAYS_INLINE void simdFilter4x4_N6_sve( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst,
+static __attribute__( ( noinline ) ) void simdFilter4x4_N6_sve( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst,
                                                 int dstStride, int width, int height, TFilterCoeff const* coeffH,
                                                 TFilterCoeff const* coeffV )
 {
