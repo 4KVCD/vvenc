@@ -198,8 +198,10 @@ void simdInterpolateN2_2D_neon( const ClpRng& clpRng, const Pel* src, const int 
   } while( height != 0 );
 }
 
-// The horizontal stage of the 8-tap filters for 8 outputs, tap by tap: offset + sum of ch[t] * src[x + t] over t = 0 .. 7,
-// in 32 bits for the low and the high four outputs, shifted and narrowed to 16 bits.
+// The horizontal stage of the 8-tap filters for 8 outputs, tap by tap: offset + sum of ch[t] * src[x + t] over
+// t = 0 .. numTaps - 1, in 32 bits for the low and the high four outputs, shifted and narrowed to 16 bits. numTaps is 7
+// for filters whose last tap is 0: lane 7 of ch is not read, and the eighth load and multiply are skipped.
+template<int numTaps>
 static inline int16x8_t filter_horiz_8x1_N8_neon( Pel const* src, int16x8_t ch, int32x4_t voffset1, int32x4_t invshift1st )
 {
   const int16x8_t vsrc0 = vld1q_s16( src + 0 );
@@ -209,7 +211,6 @@ static inline int16x8_t filter_horiz_8x1_N8_neon( Pel const* src, int16x8_t ch, 
   const int16x8_t vsrc4 = vld1q_s16( src + 4 );
   const int16x8_t vsrc5 = vld1q_s16( src + 5 );
   const int16x8_t vsrc6 = vld1q_s16( src + 6 );
-  const int16x8_t vsrc7 = vld1q_s16( src + 7 );
 
   int32x4_t vsuma = vmlal_lane_s16( voffset1, vget_low_s16( vsrc0 ), vget_low_s16( ch ), 0 );
   vsuma           = vmlal_lane_s16( vsuma, vget_low_s16( vsrc1 ), vget_low_s16( ch ), 1 );
@@ -218,7 +219,6 @@ static inline int16x8_t filter_horiz_8x1_N8_neon( Pel const* src, int16x8_t ch, 
   vsuma           = vmlal_lane_s16( vsuma, vget_low_s16( vsrc4 ), vget_high_s16( ch ), 0 );
   vsuma           = vmlal_lane_s16( vsuma, vget_low_s16( vsrc5 ), vget_high_s16( ch ), 1 );
   vsuma           = vmlal_lane_s16( vsuma, vget_low_s16( vsrc6 ), vget_high_s16( ch ), 2 );
-  vsuma           = vmlal_lane_s16( vsuma, vget_low_s16( vsrc7 ), vget_high_s16( ch ), 3 );
 
   int32x4_t vsumb = vmlal_lane_s16( voffset1, vget_high_s16( vsrc0 ), vget_low_s16( ch ), 0 );
   vsumb           = vmlal_lane_s16( vsumb, vget_high_s16( vsrc1 ), vget_low_s16( ch ), 1 );
@@ -227,24 +227,50 @@ static inline int16x8_t filter_horiz_8x1_N8_neon( Pel const* src, int16x8_t ch, 
   vsumb           = vmlal_lane_s16( vsumb, vget_high_s16( vsrc4 ), vget_high_s16( ch ), 0 );
   vsumb           = vmlal_lane_s16( vsumb, vget_high_s16( vsrc5 ), vget_high_s16( ch ), 1 );
   vsumb           = vmlal_lane_s16( vsumb, vget_high_s16( vsrc6 ), vget_high_s16( ch ), 2 );
-  vsumb           = vmlal_lane_s16( vsumb, vget_high_s16( vsrc7 ), vget_high_s16( ch ), 3 );
+
+  if( numTaps == 8 )
+  {
+    const int16x8_t vsrc7 = vld1q_s16( src + 7 );
+
+    vsuma = vmlal_lane_s16( vsuma, vget_low_s16( vsrc7 ), vget_high_s16( ch ), 3 );
+    vsumb = vmlal_lane_s16( vsumb, vget_high_s16( vsrc7 ), vget_high_s16( ch ), 3 );
+  }
 
   vsuma = vshlq_s32( vsuma, invshift1st );
   vsumb = vshlq_s32( vsumb, invshift1st );
   return vcombine_s16( vqmovn_s32( vsuma ), vqmovn_s32( vsumb ) );
 }
 
+template<int numTaps>
 static inline int16x8x2_t filter_horiz_16x1_N8_neon( Pel const* src, int16x8_t ch, int32x4_t voffset1, int32x4_t invshift1st )
 {
   int16x8x2_t result;
-  result.val[0] = filter_horiz_8x1_N8_neon( src + 0, ch, voffset1, invshift1st );
-  result.val[1] = filter_horiz_8x1_N8_neon( src + 8, ch, voffset1, invshift1st );
+  result.val[0] = filter_horiz_8x1_N8_neon<numTaps>( src + 0, ch, voffset1, invshift1st );
+  result.val[1] = filter_horiz_8x1_N8_neon<numTaps>( src + 8, ch, voffset1, invshift1st );
   return result; // explicit return since MSVC for arm64 does not support direct return with typecast
 }
 
-template<bool isLast>
-void simdFilter8xH_N8_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride, int width,
-                            int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
+// Whether the horizontal stage can run on 7 taps: true when an end tap of coeffH is 0 (VVC's luma phases 1-4 end with
+// one, 12-15 start with one). For a zero first tap, ch gets taps 1..7 moved down a lane and src moves one sample on,
+// which gives the same outputs since the dropped tap is 0.
+static inline bool horizontal7Taps( TFilterCoeff const* coeffH, int16x8_t& ch, Pel const*& src )
+{
+  if( coeffH[7] == 0 )
+  {
+    return true;
+  }
+  if( coeffH[0] == 0 )
+  {
+    ch = vextq_s16( ch, vdupq_n_s16( 0 ), 1 );
+    src += 1;
+    return true;
+  }
+  return false;
+}
+
+template<bool isLast, int numTaps>
+void simdFilter8xH_N8_body_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride,
+                                 int width, int height, int16x8_t ch, TFilterCoeff const* coeffV )
 {
   CHECKD( width != 8, "Width must be 8" );
   CHECKD( height < 4, "Height must be >= 4" );
@@ -271,31 +297,30 @@ void simdFilter8xH_N8_neon( const ClpRng& clpRng, Pel const* src, int srcStride,
   const int32x4_t voffset2 = vdupq_n_s32( offset2nd );
   const int16x8_t vibdimax = vdupq_n_s16( clpRng.max() );
 
-  int16x8_t ch = vld1q_s16( coeffH );
   int16x8_t cv = vld1q_s16( coeffV );
 
   int32x4_t invshift1st = vdupq_n_s32( -shift1st );
   int32x4_t invshift2nd = vdupq_n_s32( -shift2nd );
 
   int16x8_t vsrcv[8];
-  vsrcv[0] = filter_horiz_8x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[0] = filter_horiz_8x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[1] = filter_horiz_8x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[1] = filter_horiz_8x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[2] = filter_horiz_8x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[2] = filter_horiz_8x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[3] = filter_horiz_8x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[3] = filter_horiz_8x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[4] = filter_horiz_8x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[4] = filter_horiz_8x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[5] = filter_horiz_8x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[5] = filter_horiz_8x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[6] = filter_horiz_8x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[6] = filter_horiz_8x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
 
   do
   {
-    vsrcv[7] = filter_horiz_8x1_N8_neon( src, ch, voffset1, invshift1st );
+    vsrcv[7] = filter_horiz_8x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
     src += srcStride;
 
     int32x4x2_t vsum = filter_vert_8x1_N8_neon( vsrcv, cv, voffset2 );
@@ -329,8 +354,23 @@ void simdFilter8xH_N8_neon( const ClpRng& clpRng, Pel const* src, int srcStride,
 }
 
 template<bool isLast>
-void simdFilter16xH_N8_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride, int width,
-                             int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
+void simdFilter8xH_N8_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride, int width,
+                            int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
+{
+  int16x8_t ch = vld1q_s16( coeffH );
+  if( horizontal7Taps( coeffH, ch, src ) )
+  {
+    simdFilter8xH_N8_body_neon<isLast, 7>( clpRng, src, srcStride, dst, dstStride, width, height, ch, coeffV );
+  }
+  else
+  {
+    simdFilter8xH_N8_body_neon<isLast, 8>( clpRng, src, srcStride, dst, dstStride, width, height, ch, coeffV );
+  }
+}
+
+template<bool isLast, int numTaps>
+void simdFilter16xH_N8_body_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride,
+                                  int width, int height, int16x8_t ch, TFilterCoeff const* coeffV )
 {
   CHECKD( width != 16, "Width must be 16" );
   CHECKD( height < 4, "Height must be >= 4" );
@@ -357,31 +397,30 @@ void simdFilter16xH_N8_neon( const ClpRng& clpRng, Pel const* src, int srcStride
   const int32x4_t voffset2 = vdupq_n_s32( offset2nd );
   const int16x8_t vibdimax = vdupq_n_s16( clpRng.max() );
 
-  int16x8_t ch = vld1q_s16( coeffH );
   int16x8_t cv = vld1q_s16( coeffV );
 
   int32x4_t invshift1st = vdupq_n_s32( -shift1st );
   int32x4_t invshift2nd = vdupq_n_s32( -shift2nd );
 
   int16x8x2_t vsrcv[8];
-  vsrcv[0] = filter_horiz_16x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[0] = filter_horiz_16x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[1] = filter_horiz_16x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[1] = filter_horiz_16x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[2] = filter_horiz_16x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[2] = filter_horiz_16x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[3] = filter_horiz_16x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[3] = filter_horiz_16x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[4] = filter_horiz_16x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[4] = filter_horiz_16x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[5] = filter_horiz_16x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[5] = filter_horiz_16x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[6] = filter_horiz_16x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[6] = filter_horiz_16x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
   src += srcStride;
 
   do
   {
-    vsrcv[7] = filter_horiz_16x1_N8_neon( src, ch, voffset1, invshift1st );
+    vsrcv[7] = filter_horiz_16x1_N8_neon<numTaps>( src, ch, voffset1, invshift1st );
     src += srcStride;
 
     int32x4x4_t vsum = filter_vert_16x1_N8_neon( vsrcv, cv, voffset2 );
@@ -419,6 +458,21 @@ void simdFilter16xH_N8_neon( const ClpRng& clpRng, Pel const* src, int srcStride
 
     dst += dstStride;
   } while( --height != 0 );
+}
+
+template<bool isLast>
+void simdFilter16xH_N8_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride, int width,
+                             int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
+{
+  int16x8_t ch = vld1q_s16( coeffH );
+  if( horizontal7Taps( coeffH, ch, src ) )
+  {
+    simdFilter16xH_N8_body_neon<isLast, 7>( clpRng, src, srcStride, dst, dstStride, width, height, ch, coeffV );
+  }
+  else
+  {
+    simdFilter16xH_N8_body_neon<isLast, 8>( clpRng, src, srcStride, dst, dstStride, width, height, ch, coeffV );
+  }
 }
 
 // The horizontal stage of the 4-tap filters for 4 outputs, tap by tap: offset + sum of ch[t] * src[x + t] over
