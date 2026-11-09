@@ -1,0 +1,55 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N26 (HEAD~1: SVE 16-wide 2-D luma and chroma filters as two 8-wide strips), SVE on: unit test at --SIMD=SVE; two
+# mutants (the second luma / chroma strip writes the first strip's columns) must fail it; md5 of one encode (crowd_run
+# 1080p50, 5 pictures streamed from media.xiph.org, nothing on disk, presets fast and slow) at --SIMD=SVE and NEON
+# from the same binary (NEON's 2-D filters are master's) must match.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N26 mutants and md5 on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+          git worktree add -q /tmp/n26 HEAD~1
+          git -C /tmp/n26 log --oneline -1
+          cmake -S /tmp/n26 -B /tmp/n26/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null || echo "configure failed"
+          cmake --build /tmp/n26/build --target vvenc_unit_test vvencFFapp > /dev/null || echo "build failed"
+          cp $(find /tmp/n26/build -name vvencFFapp -type f | head -1) /tmp/vvencFFapp
+      - name: md5 SVE vs NEON
+        shell: bash
+        run: |
+          for p in fast slow; do
+            for s in SVE NEON; do
+              { curl -sL https://media.xiph.org/video/derf/y4m/crowd_run_1080p50.y4m || true; } | python3 .github/sve-check/y4m_head.py 5 \
+                | /tmp/vvencFFapp -i - --y4m=1 --preset $p -f 5 -t 4 --SIMD=$s -b /tmp/out_${p}_$s.266 > /tmp/enc.log 2>&1 || echo "encode failed: $p $s"
+              echo "$p $s $(md5sum < /tmp/out_${p}_$s.266) $(stat -c %s /tmp/out_${p}_$s.266) bytes"
+            done
+            if [ -s /tmp/out_${p}_SVE.266 ] && cmp -s /tmp/out_${p}_SVE.266 /tmp/out_${p}_NEON.266; then echo "$p md5 MATCH"; else echo "$p md5 MISMATCH or empty"; fi
+          done
+      - name: Unit test and mutants (SVE)
+        shell: bash
+        run: |
+          F=/tmp/n26/source/Lib/CommonLib/arm/sve/InterpolationFilter_sve.cpp; cp $F /tmp/orig.cpp
+          for m in none N8 N4; do
+            cp /tmp/orig.cpp $F
+            [ $m != none ] && sed -i "s/simdFilter8xH_${m}_sve<isLast>( clpRng, src + 8, srcStride, dst + 8,/simdFilter8xH_${m}_sve<isLast>( clpRng, src + 8, srcStride, dst,/" $F
+            echo "mutant $m: $(diff /tmp/orig.cpp $F | grep -c '^>') changed lines"
+            cmake --build /tmp/n26/build --target vvenc_unit_test > /dev/null || echo "build failed: $m"
+            ut=$(find /tmp/n26/build -name vvenc_unit_test -type f | head -1)
+            rc=0; $ut --SIMD=SVE > /tmp/ut.log 2>&1 || rc=$?
+            echo "mutant $m: rc=$rc, $(grep -ci fail /tmp/ut.log) fail lines"; grep -iE "passed" /tmp/ut.log | tail -1 || true
+          done
