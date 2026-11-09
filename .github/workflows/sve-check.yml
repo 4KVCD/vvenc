@@ -1,0 +1,45 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): N7 (#908, 2-D luma
+# filters' horizontal stage tap by tap) and N10 (skip a zero horizontal end tap) were only benched on Apple M1 / clang;
+# this runs the same per-call bench on Neoverse N2 / GCC 14, SVE / SVE2 built off so the NEON
+# filters run (SVE overrides them on N2). Commits: HEAD~1 = N10, HEAD~2 = N7, HEAD~3 = #873 (N7's
+# base). Two interleaved rounds; the checksum must be equal in all. Every step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "2-D luma filters on N2: #873 / N7 / N10 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          cp .github/sve-check/bench_n10.cpp /tmp/bench_n10.cpp
+          git worktree add -q /tmp/base HEAD~3
+          git worktree add -q /tmp/n7 HEAD~2
+          git worktree add -q /tmp/n10 HEAD~1
+          git -C /tmp/base log --oneline -1; git -C /tmp/n7 log --oneline -1; git -C /tmp/n10 log --oneline -1
+          for t in /tmp/base /tmp/n7 /tmp/n10; do
+            cmake -S $t -B $t/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+                  -DVVENC_ENABLE_ARM_SIMD_SVE=OFF -DVVENC_ENABLE_ARM_SIMD_SVE2=OFF > /dev/null
+            cmake --build $t/build --target vvenc > /dev/null || echo "build failed: $t"
+            g++-14 -O3 -std=c++14 -DNDEBUG -DTARGET_SIMD_ARM=1 -I$t/source/Lib -I$t/source/Lib/CommonLib -I$t/include -I$t/build -I$t/build/include \
+                /tmp/bench_n10.cpp $t/build/lib/libvvenc.a -lpthread -o $t/bench || echo "bench link failed: $t"
+          done
+      - name: Bench (two interleaved rounds)
+        shell: bash
+        run: |
+          for round in 1 2; do
+            for t in base n7 n10; do
+              echo "== round $round: $t"; [ -x /tmp/$t/bench ] || echo "MISSING /tmp/$t/bench"; /tmp/$t/bench || true
+            done
+          done
