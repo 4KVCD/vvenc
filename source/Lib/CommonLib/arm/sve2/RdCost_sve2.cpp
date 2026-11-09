@@ -196,8 +196,11 @@ Distortion xCalcHAD16x16_fast_sve2( const Pel* piOrg, const Pel* piCur, const pt
   return sad << 2;
 }
 
-Distortion xCalcHAD8x8_sve2( const Pel* piOrg, const Pel* piCur, const ptrdiff_t iStrideOrg,
-                             const ptrdiff_t iStrideCur )
+// The 8x8 Hadamard transform of org - cur up to its sums: halfAbs holds four partial sums of half the absolute
+// coefficients (the last butterfly taken as max( |x|, |y| )); lane 3 of dcVec holds the DC coefficient, the other
+// lanes are unused.
+static inline void had8x8Sums_sve2( const Pel* piOrg, const Pel* piCur, const ptrdiff_t iStrideOrg,
+                                    const ptrdiff_t iStrideCur, uint32x4_t& halfAbs, int32x4_t& dcVec )
 {
   int16x8_t m1[8], m2[8];
 
@@ -279,24 +282,63 @@ Distortion xCalcHAD8x8_sve2( const Pel* piOrg, const Pel* piCur, const ptrdiff_t
   uint16x8_t r7 = vreinterpretq_u16_s16( vabdq_s16( m1[5], m1[7] ) ); // 16-bit unsigned
 
   // The DC coefficient is lane 7 of m1[0] + m1[1] + m1[2] + m1[3].
-  const int32x4_t dcVec = vaddq_s32( vaddl_s16( vget_high_s16( m1[0] ), vget_high_s16( m1[1] ) ),
-                                     vaddl_s16( vget_high_s16( m1[2] ), vget_high_s16( m1[3] ) ) );
-  const uint32_t absDC = ( uint32_t )vgetq_lane_s32( vabsq_s32( dcVec ), 3 );
+  dcVec = vaddq_s32( vaddl_s16( vget_high_s16( m1[0] ), vget_high_s16( m1[1] ) ),
+                     vaddl_s16( vget_high_s16( m1[2] ), vget_high_s16( m1[3] ) ) );
 
   const uint16x8_t max0 = vmaxq_u16( r0, r1 );
   const uint16x8_t max1 = vmaxq_u16( r2, r3 );
   const uint16x8_t max2 = vmaxq_u16( r4, r5 );
   const uint16x8_t max3 = vmaxq_u16( r6, r7 );
 
-  const uint32x4_t sum = horizontal_add_long_4d_u16x8( max0, max1, max2, max3 );
+  // four partial sums of at most 8 * 65535 each: only their total is the sum
+  halfAbs = vpaddlq_u16( max0 );
+  halfAbs = vpadalq_u16( halfAbs, max1 );
+  halfAbs = vpadalq_u16( halfAbs, max2 );
+  halfAbs = vpadalq_u16( halfAbs, max3 );
+}
 
-  uint64_t sad = horizontal_add_long_u32x4( sum );
+Distortion xCalcHAD8x8_sve2( const Pel* piOrg, const Pel* piCur, const ptrdiff_t iStrideOrg,
+                             const ptrdiff_t iStrideCur )
+{
+  uint32x4_t halfAbs;
+  int32x4_t dcVec;
+  had8x8Sums_sve2( piOrg, piCur, iStrideOrg, iStrideCur, halfAbs, dcVec );
+
+  const uint32_t absDC = ( uint32_t )vgetq_lane_s32( vabsq_s32( dcVec ), 3 );
+
+  uint64_t sad = horizontal_add_long_u32x4( halfAbs );
   sad <<= 1; // Apply the deferred doubling from the last butterfly.
   sad -= absDC;
   sad += absDC >> 2;
   sad = ( sad + 2 ) >> 2;
 
   return sad;
+}
+
+// The SATD of a 16x16 block as four 8x8 SATDs, each rounded as in xCalcHAD8x8_sve2, with lane k of the vectors below
+// holding block k: the four reductions and roundings are done once for all four blocks.
+Distortion xCalcHAD16x16_sve2( const Pel* piOrg, const Pel* piCur, const ptrdiff_t iStrideOrg,
+                               const ptrdiff_t iStrideCur )
+{
+  uint32x4_t halfAbs[4];
+  int32x4_t dcVec[4];
+  had8x8Sums_sve2( piOrg, piCur, iStrideOrg, iStrideCur, halfAbs[0], dcVec[0] );
+  had8x8Sums_sve2( piOrg + 8, piCur + 8, iStrideOrg, iStrideCur, halfAbs[1], dcVec[1] );
+  had8x8Sums_sve2( piOrg + 8 * iStrideOrg, piCur + 8 * iStrideCur, iStrideOrg, iStrideCur, halfAbs[2], dcVec[2] );
+  had8x8Sums_sve2( piOrg + 8 * iStrideOrg + 8, piCur + 8 * iStrideCur + 8, iStrideOrg, iStrideCur, halfAbs[3],
+                   dcVec[3] );
+
+  const uint32x4_t sum = horizontal_add_4d_u32x4( halfAbs[0], halfAbs[1], halfAbs[2], halfAbs[3] );
+
+  // Lane 3 of each block's dcVec into lane k: the zips give { 2, 2, 3, 3 } of two blocks each.
+  const int32x4_t dc01 = vzip2q_s32( dcVec[0], dcVec[1] );
+  const int32x4_t dc23 = vzip2q_s32( dcVec[2], dcVec[3] );
+  const int64x2_t dc = vzip2q_s64( vreinterpretq_s64_s32( dc01 ), vreinterpretq_s64_s32( dc23 ) );
+  const uint32x4_t absDC = vreinterpretq_u32_s32( vabsq_s32( vreinterpretq_s32_s64( dc ) ) );
+
+  // Per block: 2 * sum - |DC| + ( |DC| >> 2 ), then ( x + 2 ) >> 2 as a rounding shift.
+  const uint32x4_t sad = vsraq_n_u32( vsubq_u32( vshlq_n_u32( sum, 1 ), absDC ), absDC, 2 );
+  return horizontal_add_u32x4( vrshrq_n_u32( sad, 2 ) );
 }
 
 Distortion xCalcHAD8x4_sve2( const Pel* piOrg, const Pel* piCur, const ptrdiff_t iStrideOrg,
@@ -507,6 +549,19 @@ Distortion xGetHADs_generic_sve2( const DistParam& rcDtParam )
       iRows -= 16;
     } while( iRows != 0 );
   }
+  else if( iCols % 16 == 0 && iRows == iCols )
+  {
+    do
+    {
+      for( int x = 0; x < iCols; x += 16 )
+      {
+        uiSum += xCalcHAD16x16_sve2( &piOrg[x], &piCur[x], iStrideOrg, iStrideCur );
+      }
+      piOrg += 16 * iStrideOrg;
+      piCur += 16 * iStrideCur;
+      iRows -= 16;
+    } while( iRows != 0 );
+  }
   else if( iCols % 8 == 0 && iRows == iCols )
   {
     do
@@ -608,6 +663,19 @@ Distortion xGetHADs_sve2( const DistParam& rcDtParam )
       piOrg += 8 * iStrideOrg;
       piCur += 8 * iStrideCur;
       iRows -= 8;
+    } while( iRows != 0 );
+  }
+  else if( iCols % 16 == 0 && iRows == iCols )
+  {
+    do
+    {
+      for( int x = 0; x < iCols; x += 16 )
+      {
+        uiSum += xCalcHAD16x16_sve2( &piOrg[x], &piCur[x], iStrideOrg, iStrideCur );
+      }
+      piOrg += 16 * iStrideOrg;
+      piCur += 16 * iStrideCur;
+      iRows -= 16;
     } while( iRows != 0 );
   }
   else if( iCols % 8 == 0 && iRows == iCols )
