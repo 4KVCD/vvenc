@@ -1,0 +1,47 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): the SVE2 16x16 SATD
+# (N19). The commit below this test commit is N19, the one below that N17. Unit test RdCost at SVE2 on N19; per-call
+# bench of the HAD pointers on N17 (NEON and SVE2) and N19 (SVE2), two interleaved rounds, with output checksums that
+# must match. Every step reports and none fails the job: the log is read by hand.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "SVE2 SATD 16x16: unit test and bench (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build N19 and N17
+        shell: bash
+        run: |
+          cp .github/sve-check/bench_had_sve.cpp /tmp/bench_had_sve.cpp
+          git worktree add -q /tmp/n17 HEAD~2
+          for t in . /tmp/n17; do
+            cmake -S $t -B $t/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null
+            cmake --build $t/build --target vvenc vvenc_unit_test > /dev/null || echo "build failed: $t"
+            g++-14 -O2 -std=c++14 -I$t/source/Lib -I$t/source/Lib/CommonLib -I$t/include -I$t/build -I$t/build/include \
+                /tmp/bench_had_sve.cpp $t/build/lib/libvvenc.a -lpthread -o $t/bench_had || echo "bench link failed: $t"
+          done
+          git -C /tmp/n17 log --oneline -1; git log --oneline -2
+      - name: Unit test RdCost at SVE2 (N19)
+        shell: bash
+        run: |
+          ut=$(find build -name vvenc_unit_test -type f | head -1)
+          rc=0; $ut --SIMD=SVE2 --testcase=RdCost --seed=1 > ut.log 2>&1 || rc=$?
+          echo "rc=$rc"; grep -iE "passed|fail" ut.log | tail -5 || true
+      - name: Bench (two interleaved rounds; checksums must match per size)
+        shell: bash
+        run: |
+          for round in 1 2; do
+            echo "== round $round: N17 NEON";  /tmp/n17/bench_had NEON || true
+            echo "== round $round: N17 SVE2";  /tmp/n17/bench_had SVE2 || true
+            echo "== round $round: N19 SVE2";  ./bench_had SVE2 || true
+          done
