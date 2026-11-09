@@ -1,0 +1,56 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): the SVE sumSquaredError,
+# which the regular CI does not build (GCC 13 lacks arm_neon_sve_bridge.h), tested and timed on an SVE machine, plus a
+# mutant that must fail the unit test. Every step reports and none fails the job: the log is read by hand.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "PelBufferOps unit test, sumSquaredError bench, NEON / SVE (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: CPU
+        run: lscpu | grep -i -E 'model name|flags' || true
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 | tee cmake.log
+          grep -i "sve" cmake.log || true
+          cmake --build build --target vvenc vvenc_unit_test || true
+          g++-14 -O2 -std=c++14 -Isource/Lib -Iinclude -Ibuild -Ibuild/include \
+              .github/sve-check/bench_ssebuf.cpp build/lib/libvvenc.a -lpthread -o bench_ssebuf || true
+          find build -name vvenc_unit_test -type f
+      - name: Unit test (PelBufferOps)
+        shell: bash
+        run: |
+          ut=$(find build -name vvenc_unit_test -type f | head -1)
+          for simd in SVE2 SVE NEON; do
+            echo "== PelBufferOps $simd"
+            $ut --SIMD=$simd --testcase=PelBufferOps --seed=1 > ut_$simd.log 2>&1; echo "exit $?"
+            grep -i -E "SIMD|failed" ut_$simd.log | head -20 || true; tail -1 ut_$simd.log
+          done
+      - name: Bench (three rounds, alternating)
+        shell: bash
+        run: |
+          for round in 1 2 3; do
+            for simd in NEON SVE; do
+              echo "== $simd, round $round"; ./bench_ssebuf $simd || true
+            done
+          done
+      - name: Mutant (SVE accumulator drops lane 7's square; the unit test must fail)
+        shell: bash
+        run: |
+          sed -i 's/acc = vvenc_sdotq_s16( acc, diff, diff );/acc = vvenc_sdotq_s16( acc, diff, vsetq_lane_s16( 0, diff, 7 ) );/' \
+              source/Lib/CommonLib/arm/sve/Buffer_sve.cpp
+          grep -c "vsetq_lane_s16( 0, diff, 7 )" source/Lib/CommonLib/arm/sve/Buffer_sve.cpp || true
+          cmake --build build --target vvenc_unit_test || true
+          ut=$(find build -name vvenc_unit_test -type f | head -1)
+          $ut --SIMD=SVE --testcase=PelBufferOps --seed=1 > ut_mutant.log 2>&1; echo "mutant exit $? (must be non-zero)"
+          grep -i "failed" ut_mutant.log | head -5 || true
