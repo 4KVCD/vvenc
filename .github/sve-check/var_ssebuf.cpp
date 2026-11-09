@@ -4,6 +4,7 @@
 //   sve2   : one vvenc_sdotq_s16 per 8 differences, 2 chains, 16 columns per step (N20 as committed)
 //   sve4c  : 4 chains, 32 columns per step (16-column remainder on chains 0 and 1)
 //   sve4r  : 4 chains, 16 columns of 2 rows per step (odd last row on chains 0 and 1)
+//   neon4r : the NEON accumulator on 4 chains, as sve4r
 #include <arm_neon.h>
 #include <arm_neon_sve_bridge.h>
 #include <arm_sve.h>
@@ -99,6 +100,27 @@ __attribute__( ( noinline ) ) uint64_t sve4r( const Pel* a, ptrdiff_t sa, const 
   return uint64_t( vaddvq_s64( vaddq_s64( vaddq_s64( acc0, acc1 ), vaddq_s64( acc2, acc3 ) ) ) );
 }
 
+__attribute__( ( noinline ) ) uint64_t neon4r( const Pel* a, ptrdiff_t sa, const Pel* b, ptrdiff_t sb, int w, int h )
+{
+  uint64x2_t acc0 = vdupq_n_u64( 0 ), acc1 = vdupq_n_u64( 0 ), acc2 = vdupq_n_u64( 0 ), acc3 = vdupq_n_u64( 0 );
+  int        y    = 0;
+  for( ; y + 2 <= h; y += 2, a += 2 * sa, b += 2 * sb )
+    for( int x = 0; x < w; x += 16 )
+    {
+      acc0 = neonAdd( acc0, diff8( a + x, b + x ) );
+      acc1 = neonAdd( acc1, diff8( a + x + 8, b + x + 8 ) );
+      acc2 = neonAdd( acc2, diff8( a + sa + x, b + sb + x ) );
+      acc3 = neonAdd( acc3, diff8( a + sa + x + 8, b + sb + x + 8 ) );
+    }
+  if( y < h )
+    for( int x = 0; x < w; x += 16 )
+    {
+      acc0 = neonAdd( acc0, diff8( a + x, b + x ) );
+      acc1 = neonAdd( acc1, diff8( a + x + 8, b + x + 8 ) );
+    }
+  return vaddvq_u64( vaddq_u64( vaddq_u64( acc0, acc1 ), vaddq_u64( acc2, acc3 ) ) );
+}
+
 typedef uint64_t ( *Kernel )( const Pel*, ptrdiff_t, const Pel*, ptrdiff_t, int, int );
 
 int main()
@@ -110,7 +132,7 @@ int main()
   for( auto& v : b ) v = Pel( rng() & 1023 );
 
   const struct { const char* name; Kernel k; } kernels[] = { { "neon2", neon2 }, { "sve2", sve2 }, { "sve4c", sve4c },
-                                                             { "sve4r", sve4r } };
+                                                             { "sve4r", sve4r }, { "neon4r", neon4r } };
   const int sizes[][2] = { { 16, 16 }, { 32, 32 }, { 64, 64 }, { 128, 128 }, { 1920, 1080 } };
   for( int round = 1; round <= 3; round++ )
   {
