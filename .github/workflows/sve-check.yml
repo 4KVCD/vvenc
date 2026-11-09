@@ -1,0 +1,43 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N30 audit: on SVE machines master's affine luma path (per 4x4 sub-block through m_filter4x4 / filterHor / filterVer,
+# the SVE 4x4 filter where both fractions are non-zero, plus the PROF pointers) against the fused CU kernel of #873
+# (HEAD~2) and of #908 (HEAD~1, tap-by-tap horizontal stage), which call the NEON 4x4 filter directly. bench_affine
+# times both paths of one library per CU (A B B A, equal outputs checked). SVE on (default build), two rounds per tree.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N30 affine CU kernels vs the SVE per-sub-block path on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+          git worktree add -q /tmp/b873 HEAD~2
+          git worktree add -q /tmp/b908 HEAD~1
+          for t in b873 b908; do
+            echo "$t $(git -C /tmp/$t log --oneline -1 | cut -c1-70)"
+            b=/tmp/$t/build
+            cmake -S /tmp/$t -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null || echo "configure failed: $t"
+            cmake --build $b --target vvenc > /dev/null || echo "build failed: $t"
+            defs=$(python3 -c "import json,shlex; e=[x for x in json.load(open('$b/compile_commands.json')) if x['file'].endswith('CommonLib/InterPrediction.cpp')][0]; print(' '.join(t for t in shlex.split(e['command']) if t.startswith('-D')))")
+            g++-14 -O3 -std=gnu++14 $defs -I/tmp/$t/source/Lib -I/tmp/$t/source/Lib/CommonLib -I/tmp/$t/include -I$b -I$b/include \
+                .github/sve-check/bench_affine.cpp $b/lib/libvvenc.a -lpthread -o /tmp/bench_$t || echo "link failed: $t"
+            echo "$t: simdFilter4x4_N6_sve in bench: $(nm -C /tmp/bench_$t | grep -c 'simdFilter4x4_N6_sve' || true)"
+          done
+          echo "defs: $defs"
+      - name: Bench (b873 b908 b908 b873)
+        shell: bash
+        run: |
+          for t in b873 b908 b908 b873; do echo "== $t"; /tmp/bench_$t || true; done
