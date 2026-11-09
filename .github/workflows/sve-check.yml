@@ -1,0 +1,66 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): the SVE LFNST row dots
+# (N21), which the regular CI does not build. No unit test reaches the LFNST pointers, so bench_lfnst_sve's hash of all
+# outputs at SCALAR, NEON and SVE is the equality test; two mutants must change the SVE hash. Every step reports and
+# none fails the job: the log is read by hand.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "LFNST equality, bench and mutants, NEON / SVE (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON > /dev/null
+          cmake --build build --target vvenc > /dev/null || true
+          cat > bench.sh <<'EOF'
+          g++-14 -O2 -std=c++14 -Isource/Lib -Isource/Lib/CommonLib -Iinclude -Ibuild -Ibuild/include \
+              .github/sve-check/bench_lfnst_sve.cpp build/lib/libvvenc.a -lpthread -o bench_lfnst_sve
+          EOF
+          bash bench.sh || true
+      - name: Equality (output hash must be the same at every level)
+        shell: bash
+        run: |
+          for simd in SCALAR NEON SVE; do ./bench_lfnst_sve $simd | grep -E "SIMD|hash" || true; done
+      - name: Bench (three rounds, alternating)
+        shell: bash
+        run: |
+          for round in 1 2 3; do
+            for simd in NEON SVE; do echo "== $simd, round $round"; ./bench_lfnst_sve $simd | grep -v hash || true; done
+          done
+      - name: GCC 14 code of the SVE row dots
+        shell: bash
+        run: |
+          python3 - <<'EOF' > cmd.sh || true
+          import json
+          for e in json.load(open("build/compile_commands.json")):
+              if e["file"].endswith("arm/sve/Trafo_sve.cpp"):
+                  c = e["command"].replace(" -flto=auto", "").replace(" -flto", "").replace(" -fno-fat-lto-objects", "")
+                  print("cd " + e["directory"] + " && " + c.split(" -o ")[0] + " -fno-lto -o /tmp/trafo_sve.o -c " + e["file"])
+          EOF
+          bash cmd.sh || true
+          objdump -d --no-show-raw-insn /tmp/trafo_sve.o | awk '/Lfnst|lfnst/{p=1} p' | grep -E ">:$|sdot|ld1sb|movprfx|mov\s+v|addp|uzp1|b\.|ret" | head -120 || true
+      - name: Mutants (each must change the SVE hash)
+        shell: bash
+        run: |
+          f=source/Lib/CommonLib/arm/sve/Trafo_sve.cpp
+          cp $f /tmp/orig.cpp
+          sed -i 's/acc = vvenc_sdotq_s16( acc, in\[i \/ 8\], m );/acc = vvenc_sdotq_s16( acc, in[i \/ 8], vsetq_lane_s16( 0, m, 7 ) );/' $f
+          echo "lane-7 mutant lines: $(grep -c 'vsetq_lane_s16( 0, m, 7 )' $f)"
+          cmake --build build --target vvenc > /dev/null || true; bash bench.sh || true
+          ./bench_lfnst_sve SVE | grep hash || true
+          cp /tmp/orig.cpp $f
+          sed -i 's/const int64x2_t sum01 = vpaddq_s64( dot0, dot1 );/const int64x2_t sum01 = vpaddq_s64( dot1, dot0 );/' $f
+          echo "row-swap mutant lines: $(grep -c 'vpaddq_s64( dot1, dot0 )' $f)"
+          cmake --build build --target vvenc > /dev/null || true; bash bench.sh || true
+          ./bench_lfnst_sve SVE | grep hash || true
+          cp /tmp/orig.cpp $f
