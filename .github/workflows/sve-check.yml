@@ -1,0 +1,49 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N4 (#903, branch neon-inv-core-no-clear): bench_n4.cpp links master's library (HEAD~1, SVE off) and compiles #903's
+# fastInvCore_neon into the bench; equality over all sizes, then per-call A B B A. N8 (#909) audit and N27 feasibility:
+# bench_mctf.cpp (self-contained, kernels pasted from the trees): master NEON vs #909's NEON, master SVE vs the N27 SVE
+# prototype, in an emulated MCTF integer search on synthetic pictures; vectors and errors must equal master's.
+# Two rounds. Every step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N4 / N8 audit, N27 feasibility on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+          git worktree add -q /tmp/master HEAD~1
+          git fetch -q --depth=1 origin neon-inv-core-no-clear
+          mkdir -p /tmp/n4
+          git show FETCH_HEAD:source/Lib/CommonLib/arm/neon/Trafo_neon.cpp | awk '/^template<unsigned trSize>$/{t=$0; next} t&&/^static void fastInvCore_neon\(/{f=1; print t} {t=""} f{print} f&&/^}$/{exit}' > /tmp/n4/n4_kernel.inc
+          echo "n4 kernel lines: $(wc -l < /tmp/n4/n4_kernel.inc)"; head -2 /tmp/n4/n4_kernel.inc
+          T=/tmp/master; b=$T/build
+          cmake -S $T -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DVVENC_ENABLE_ARM_SIMD_SVE=OFF -DVVENC_ENABLE_ARM_SIMD_SVE2=OFF > /dev/null || echo "configure failed"
+          cmake --build $b --target vvenc > /dev/null || echo "build failed"
+          # the library's own -D flags for the transform file, so that the bench sees the same configuration
+          defs=$(python3 -c "import json,shlex; e=[x for x in json.load(open('$b/compile_commands.json')) if x['file'].endswith('CommonLib/TrQuant_EMT.cpp')][0]; print(' '.join(t for t in shlex.split(e['command']) if t.startswith('-D')))")
+          echo "defs: $defs"
+          g++-14 -O3 -std=gnu++14 $defs -I/tmp/n4 -I$T/source/Lib -I$T/source/Lib/CommonLib -I$T/source/Lib/CommonLib/arm \
+              -I$T/source/Lib/CommonLib/arm/neon -I$T/include -I$b -I$T/thirdparty .github/sve-check/bench_n4.cpp $b/lib/libvvenc.a \
+              -lpthread -o /tmp/bench_n4 || echo "n4 link failed"
+          g++-14 -O3 -std=c++17 -march=armv8.2-a+sve -Wall .github/sve-check/bench_mctf.cpp -o /tmp/bench_mctf || echo "mctf build failed"
+      - name: Bench (two rounds)
+        shell: bash
+        run: |
+          for round in 1 2; do
+            echo "== round $round: n4"; /tmp/bench_n4 || true
+            echo "== round $round: mctf"; /tmp/bench_mctf || true
+          done
