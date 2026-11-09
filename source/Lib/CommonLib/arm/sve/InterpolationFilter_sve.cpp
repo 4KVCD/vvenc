@@ -96,15 +96,6 @@ static inline int16x8_t filter_horiz_8x1_N8_sve( Pel const* src, int16x8_t ch, i
   return vcombine_s16( lo, hi );
 }
 
-static inline int16x8x2_t filter_horiz_16x1_N8_sve( Pel const* src, int16x8_t ch, int32x4_t voffset1,
-                                                    int32x4_t invshift1st )
-{
-  int16x8x2_t result;
-  result.val[0] = filter_horiz_8x1_N8_sve( src + 0, ch, voffset1, invshift1st );
-  result.val[1] = filter_horiz_8x1_N8_sve( src + 8, ch, voffset1, invshift1st );
-  return result;
-}
-
 template<bool isLast>
 void simdFilter4x4_N6_sve( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride, int width,
                            int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
@@ -323,102 +314,16 @@ void simdFilter8xH_N8_sve( const ClpRng& clpRng, Pel const* src, int srcStride, 
   } while( height != 0 );
 }
 
+// The 16-wide filter as two 8-wide strips: each output depends only on its own column's taps, so the strips give the
+// same samples, and an 8-wide strip keeps its whole 8-row window in registers.
 template<bool isLast>
 void simdFilter16xH_N8_sve( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride, int width,
                             int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
 {
   CHECKD( width != 16, "Width must be 16" );
-  CHECKD( height < 4, "Height must be >= 4" );
-  CHECKD( height % 4 != 0, "Height must be a multiple of 4" );
-  CHECKD( IF_INTERNAL_PREC - clpRng.bd < 2, "Bit depth headroom must be at least 2" );
 
-  OFFSET( src, srcStride, -3, -3 );
-
-  const int headRoom = IF_INTERNAL_PREC - clpRng.bd;
-  const int shift1st = IF_FILTER_PREC - headRoom;
-  const int shift2nd = IF_FILTER_PREC + headRoom;
-
-  const int offset1st = -IF_INTERNAL_OFFS * ( 1 << shift1st );
-  int offset2nd;
-  if( isLast )
-  {
-    offset2nd = ( 1 << ( shift2nd - 1 ) ) + ( IF_INTERNAL_OFFS << IF_FILTER_PREC );
-  }
-  else
-  {
-    offset2nd = 0;
-  }
-  const int32x4_t voffset1 = vdupq_n_s32( offset1st );
-  const int32x4_t voffset2 = vdupq_n_s32( offset2nd );
-  const int16x8_t vibdimax = vdupq_n_s16( clpRng.max() );
-
-  int16x8_t ch = vld1q_s16( coeffH );
-  int16x8_t cv = vld1q_s16( coeffV );
-
-  int32x4_t invshift1st = vdupq_n_s32( -shift1st );
-  int32x4_t invshift2nd = vdupq_n_s32( -shift2nd );
-
-  int16x8x2_t vsrcv[8];
-  vsrcv[0] = filter_horiz_16x1_N8_sve( src, ch, voffset1, invshift1st );
-  src += srcStride;
-  vsrcv[1] = filter_horiz_16x1_N8_sve( src, ch, voffset1, invshift1st );
-  src += srcStride;
-  vsrcv[2] = filter_horiz_16x1_N8_sve( src, ch, voffset1, invshift1st );
-  src += srcStride;
-  vsrcv[3] = filter_horiz_16x1_N8_sve( src, ch, voffset1, invshift1st );
-  src += srcStride;
-  vsrcv[4] = filter_horiz_16x1_N8_sve( src, ch, voffset1, invshift1st );
-  src += srcStride;
-  vsrcv[5] = filter_horiz_16x1_N8_sve( src, ch, voffset1, invshift1st );
-  src += srcStride;
-  vsrcv[6] = filter_horiz_16x1_N8_sve( src, ch, voffset1, invshift1st );
-  src += srcStride;
-
-  do
-  {
-    vsrcv[7] = filter_horiz_16x1_N8_sve( src, ch, voffset1, invshift1st );
-    src += srcStride;
-
-    int32x4x4_t vsum0 = filter_vert_16x1_N8_neon( vsrcv, cv, voffset2 );
-
-    int16x8_t d0_lo, d0_hi;
-    if( isLast ) // clip
-    {
-      int32x4_t vsum00 = vshlq_s32( vsum0.val[0], invshift2nd );
-      int32x4_t vsum01 = vshlq_s32( vsum0.val[1], invshift2nd );
-      int32x4_t vsum02 = vshlq_s32( vsum0.val[2], invshift2nd );
-      int32x4_t vsum03 = vshlq_s32( vsum0.val[3], invshift2nd );
-
-      uint16x8_t usum0_lo = vcombine_u16( vqmovun_s32( vsum00 ), vqmovun_s32( vsum01 ) );
-      uint16x8_t usum0_hi = vcombine_u16( vqmovun_s32( vsum02 ), vqmovun_s32( vsum03 ) );
-
-      d0_lo = vminq_s16( vibdimax, vreinterpretq_s16_u16( usum0_lo ) );
-      d0_hi = vminq_s16( vibdimax, vreinterpretq_s16_u16( usum0_hi ) );
-    }
-    else
-    {
-      int16x4_t t00 = vqshrn_n_s32( vsum0.val[0], IF_FILTER_PREC );
-      int16x4_t t01 = vqshrn_n_s32( vsum0.val[1], IF_FILTER_PREC );
-      d0_lo = vcombine_s16( t00, t01 );
-
-      int16x4_t t02 = vqshrn_n_s32( vsum0.val[2], IF_FILTER_PREC );
-      int16x4_t t03 = vqshrn_n_s32( vsum0.val[3], IF_FILTER_PREC );
-      d0_hi = vcombine_s16( t02, t03 );
-    }
-
-    vst1q_s16( dst + 0, d0_lo );
-    vst1q_s16( dst + 8, d0_hi );
-    dst += dstStride;
-
-    vsrcv[0] = vsrcv[1];
-    vsrcv[1] = vsrcv[2];
-    vsrcv[2] = vsrcv[3];
-    vsrcv[3] = vsrcv[4];
-    vsrcv[4] = vsrcv[5];
-    vsrcv[5] = vsrcv[6];
-    vsrcv[6] = vsrcv[7];
-
-  } while( --height != 0 );
+  simdFilter8xH_N8_sve<isLast>( clpRng, src, srcStride, dst, dstStride, 8, height, coeffH, coeffV );
+  simdFilter8xH_N8_sve<isLast>( clpRng, src + 8, srcStride, dst + 8, dstStride, 8, height, coeffH, coeffV );
 }
 
 static inline int16x4_t filter_horiz_4x1_N4_sve( Pel const* src, int16x4_t ch, int32x4_t voffset1,

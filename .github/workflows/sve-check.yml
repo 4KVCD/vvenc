@@ -1,0 +1,48 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request), Neoverse N2 / GCC 14
+# with SVE on (as N2 runs): N26, the 16-wide SVE fused 2-D luma filter as two 8-wide strips (HEAD = master + N26 + this
+# check) against master (HEAD~1). vvenc_unit_test at SVE (the 2-D filter test draws random phases and sizes), then
+# bench_n25 at phases 4, 12, 8, widths 8 and 16, heights 4 to 64, isLast 0 / 1, two interleaved rounds; checksums
+# must match. Every step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N26 SVE 2-D filters on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          cp .github/sve-check/bench_n25.cpp /tmp/
+          git worktree add -q /tmp/master HEAD~1
+          git worktree add -q /tmp/n26 HEAD
+          for t in master n26; do git -C /tmp/$t log --oneline -1; done
+          inc() { echo "-I$1/source/Lib -I$1/source/Lib/CommonLib -I$1/include -I$1/build -I$1/build/include"; }
+          for t in master n26; do
+            cmake -S /tmp/$t -B /tmp/$t/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null
+            cmake --build /tmp/$t/build --target vvenc vvenc_unit_test > /dev/null || echo "build failed: $t"
+            g++-14 -O3 -std=c++14 -DNDEBUG -DTARGET_SIMD_ARM=1 $(inc /tmp/$t) /tmp/bench_n25.cpp /tmp/$t/build/lib/libvvenc.a \
+                -lpthread -o /tmp/$t/bench || echo "link failed: $t"
+          done
+      - name: Unit test at SVE (N26)
+        shell: bash
+        run: |
+          ut=$(find /tmp/n26/build -name vvenc_unit_test -type f | head -1)
+          rc=0; $ut --SIMD=SVE > ut.log 2>&1 || rc=$?
+          echo "rc=$rc"; grep -iE "passed|fail" ut.log | tail -5 || true
+      - name: Bench (two interleaved rounds)
+        shell: bash
+        run: |
+          for round in 1 2; do
+            for t in master n26; do echo "== round $round: $t"; /tmp/$t/bench || true; done
+          done
