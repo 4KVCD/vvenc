@@ -1,0 +1,44 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N32 audit: on SVE machines master's MCTF low-res subpel search calls m_motionErrorLumaFrac8[1] per vector (the SVE
+# kernel); #864 (HEAD~2) adds the NEON column kernel m_motionErrorLumaFracColumn, N18 (HEAD~1) its SVE version.
+# bench_mctf_column times both paths of one library ("single" = master's per-vector path, "column" = the tree's column
+# kernel), SVE on, for both trees, two rounds. Kernel calls only: the per-vector path's getRefBlock per vector (once per
+# column with the column kernel) is not timed, so the column kernel's real gain is larger. Random samples: "single"
+# is shown without early exit, with besterror = the first vector's error and with 1/8 of it (a search's best error).
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N32 MCTF column kernels vs the SVE per-vector path on N2 (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          echo "cpu sve: $(grep -m1 -ow sve /proc/cpuinfo || echo none)"
+          git worktree add -q /tmp/b864 HEAD~2
+          git worktree add -q /tmp/n18 HEAD~1
+          for t in b864 n18; do
+            echo "$t $(git -C /tmp/$t log --oneline -1 | cut -c1-70)"
+            b=/tmp/$t/build
+            cmake -S /tmp/$t -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null || echo "configure failed: $t"
+            cmake --build $b --target vvenc > /dev/null || echo "build failed: $t"
+            defs=$(python3 -c "import json,shlex; e=[x for x in json.load(open('$b/compile_commands.json')) if x['file'].endswith('CommonLib/MCTF.cpp')][0]; print(' '.join(t for t in shlex.split(e['command']) if t.startswith('-D')))")
+            g++-14 -O3 -std=gnu++14 $defs -I/tmp/$t/source/Lib -I/tmp/$t/source/Lib/CommonLib -I/tmp/$t/include -I$b -I$b/include \
+                .github/sve-check/bench_mctf_column.cpp $b/lib/libvvenc.a -lpthread -o /tmp/bench_$t || echo "link failed: $t"
+            echo "$t: frac_sve=$(nm -C /tmp/bench_$t | grep -c 'motionErrorLumaFrac_loRes_sve' || true) column=$(nm -C /tmp/bench_$t | grep -oE 'motionErrorLumaFracColumn_loRes_(sve|neon)' | sort -u | tr '\n' ' ' || true)"
+          done
+      - name: Bench (b864 n18 n18 b864)
+        shell: bash
+        run: |
+          for t in b864 n18 n18 b864; do echo "== $t"; /tmp/bench_$t || true; done
