@@ -1,0 +1,40 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): Neoverse N2 / GCC 14.
+# N35c: why the unchanged 16-point forward DCT-II takes ~2 % longer per call with N35 (HEAD~1) than with its base #911
+# (HEAD~2) on N2: GCC 14's code for fwdEvenOddLines_neon<16> (and <64>, <32>) in both libraries, diffed with addresses
+# stripped; plus the functions' sizes and alignment.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "N35c: GCC 14 code of fwdEvenOddLines_neon<16> with and without N35 (ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build and disassemble
+        shell: bash
+        run: |
+          git worktree add -q /tmp/base HEAD~2
+          git worktree add -q /tmp/n35 HEAD~1
+          for t in base n35; do
+            b=/tmp/$t/build
+            cmake -S /tmp/$t -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null || echo "configure failed: $t"
+            cmake --build $b --target vvenc > /dev/null || echo "build failed: $t"
+            o=$(find $b -name 'Trafo_neon.cpp.o' | head -1); echo "$t object: $o"
+            nm -S -C $o | grep -E 'fwdEvenOddLines_neon|fastForwardDCT2_EvenOdd_neon|fwdTwoLevel' | sort
+            for n in 16 32 64; do
+              sym=$(nm $o | grep -E "fwdEvenOddLines_neonILi${n}E" | awk '{print $3}' | head -1)
+              echo "$t <$n> symbol: $sym"
+              objdump -d --no-show-raw-insn --disassemble="$sym" $o | grep -E '^\s+[0-9a-f]+:' | sed -E 's/^\s+[0-9a-f]+:\s+//; s/[0-9a-f]+ <[^>]*>/ADDR/' > /tmp/$t.$n.s
+              wc -l < /tmp/$t.$n.s
+            done
+          done
+          for n in 16 64; do echo "== diff <$n>"; diff /tmp/base.$n.s /tmp/n35.$n.s | head -80 || true; done
