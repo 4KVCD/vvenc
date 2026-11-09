@@ -1,0 +1,78 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): why the SVE2 16x16
+# SATD (N19) is slower on Neoverse N2 / GCC 14, and whether N17's NEON 16x16 is faster than master there. Commits:
+# HEAD~1 = N19, HEAD~2 = N17, HEAD~3 = master. Variant "tree": the four partial sums by horizontal_add_long_4d_u16x8
+# (a tree) instead of the vpaddl + 3 vpadal chain, in N17 (NEON) and N19 (SVE2). Per-call bench, two interleaved
+# rounds, checksums must match; plus GCC's stack spills in the 16x16 kernels. Every step reports, none fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "SATD 16x16 on N2: master / N17 / N19 / tree variants (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Trees
+        shell: bash
+        run: |
+          cp .github/sve-check/bench_had_sve.cpp /tmp/bench_had_sve.cpp
+          git worktree add -q /tmp/master HEAD~3
+          git worktree add -q /tmp/n17 HEAD~2
+          git worktree add -q /tmp/n19 HEAD~1
+          git worktree add -q /tmp/n17t HEAD~2
+          git worktree add -q /tmp/n19t HEAD~1
+          python3 - <<'EOF'
+          chain = """  halfAbs = vpaddlq_u16( max0 );
+            halfAbs = vpadalq_u16( halfAbs, max1 );
+            halfAbs = vpadalq_u16( halfAbs, max2 );
+            halfAbs = vpadalq_u16( halfAbs, max3 );"""
+          tree = "  halfAbs = horizontal_add_long_4d_u16x8( max0, max1, max2, max3 );"
+          for f in ["/tmp/n17t/source/Lib/CommonLib/arm/neon/RdCost_neon.cpp", "/tmp/n19t/source/Lib/CommonLib/arm/sve2/RdCost_sve2.cpp"]:
+              s = open(f).read()
+              print(f, "chains:", s.count(chain))
+              open(f, "w").write(s.replace(chain, tree))
+          EOF
+      - name: Build
+        shell: bash
+        run: |
+          for t in /tmp/master /tmp/n17 /tmp/n19 /tmp/n17t /tmp/n19t; do
+            cmake -S $t -B $t/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                  -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON > /dev/null
+            cmake --build $t/build --target vvenc > /dev/null || echo "build failed: $t"
+            g++-14 -O2 -std=c++14 -I$t/source/Lib -I$t/source/Lib/CommonLib -I$t/include -I$t/build -I$t/build/include \
+                /tmp/bench_had_sve.cpp $t/build/lib/libvvenc.a -lpthread -o $t/bench_had || echo "bench link failed: $t"
+          done
+      - name: Bench (two interleaved rounds)
+        shell: bash
+        run: |
+          for round in 1 2; do
+            for arm in "master NEON" "n17 NEON" "n17t NEON" "n17 SVE2" "n19 SVE2" "n19t SVE2"; do
+              set -- $arm; echo "== round $round: $1 $2"; [ -x /tmp/$1/bench_had ] || echo "MISSING /tmp/$1/bench_had"; /tmp/$1/bench_had $2 | grep -E "8x8 |16x16|32x32|128x128" || true
+            done
+          done
+      - name: GCC 14 stack spills in the 16x16 kernels (no LTO)
+        shell: bash
+        run: |
+          for t in n17 n19; do
+            python3 - $t <<'EOF' > /tmp/cmd_$t.sh || true
+          import json, sys
+          t = sys.argv[1]
+          for e in json.load(open(f"/tmp/{t}/build/compile_commands.json")):
+              if e["file"].endswith(("arm/neon/RdCost_neon.cpp", "arm/sve2/RdCost_sve2.cpp")):
+                  c = e["command"].replace(" -flto=auto", "").replace(" -flto", "").replace(" -fno-fat-lto-objects", "")
+                  o = "/tmp/" + t + "_" + e["file"].split("/")[-1] + ".o"
+                  print("cd " + e["directory"] + " && " + c.split(" -o ")[0] + " -fno-lto -o " + o + " -c " + e["file"])
+          EOF
+            bash /tmp/cmd_$t.sh || true
+          done
+          for o in /tmp/n17_RdCost_neon.cpp.o /tmp/n19_RdCost_sve2.cpp.o; do
+            echo "== $o"
+            objdump -d --no-show-raw-insn -C $o | awk '/^[0-9a-f]+ <.*>:$/{name=$0} /sp/ && /(str|stp|ldr|ldp)[ \t]+q/{n[name]++} END{for(k in n) print n[k], k}' | grep -iE "HAD16x16|HAD8x8|xGetHADs" || true
+          done
