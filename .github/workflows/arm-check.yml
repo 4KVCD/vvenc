@@ -1,0 +1,34 @@
+# Temporary check, run only on this fork's arm-check* branches (not part of any pull request): NEON kernel variants
+# timed on a Neoverse N2 runner. Every step reports and none fails the job: the log is read by hand.
+name: Arm check
+
+on:
+  push:
+    branches: [arm-check*]
+
+jobs:
+  bench:
+    name: "MIP matrix multiply: vld4q_u8 vs plain loads + vuzp vs vmull (GCC 14, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: CPU
+        run: lscpu | grep -i -E 'model name' || true
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > cmake.log
+          cmake --build build --target vvenc || true
+          mkdir -p inc
+          awk '/^\/\/ MIP matrix multiply, as mipMatrixMulCore/{f=1} /^\/\/ The averaging kernels/{if(f) exit} f' \
+              source/Lib/CommonLib/arm/neon/Buffer_neon.cpp > inc/mip_kernel.inc
+          lib=$(find build -name libvvenc.a | head -1); echo "lib $lib"
+          g++-14 -O3 -std=gnu++14 -DNDEBUG -DTARGET_SIMD_ARM=1 -DTARGET_SIMD_X86=1 -DUSE_SSE41 -Iinc -I.github/arm-check \
+              -Isource/Lib/CommonLib/arm/neon -Isource/Lib -Isource/Lib/CommonLib -Isource/Lib/CommonLib/arm -Iinclude \
+              -Ibuild -Ibuild/include -Ithirdparty .github/arm-check/bench_mip_variants.cpp $lib -lpthread -o bench_mip || true
+      - name: Bench (three rounds)
+        shell: bash
+        run: for r in 1 2 3; do echo "== round $r"; ./bench_mip || true; done
