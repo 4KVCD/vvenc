@@ -4105,7 +4105,8 @@ static bool check_width2Ops( PelBufferOps* ref, PelBufferOps* opt, unsigned num_
 }
 
 // sub4 and sub8 with any Pel values (the SIMD versions wrap around like C) for the widths AreaBuf::subtract passes them
-// (4, multiples of 8); the whole destination is compared, so that writes beyond the block are found
+// (multiples of 8 to sub8, other multiples of 4 to sub4); the whole destination is compared, so that writes beyond the
+// block and samples left out are found
 static bool check_sub( PelBufferOps* ref, PelBufferOps* opt, unsigned num_cases )
 {
   printf( "Testing PelBufferOps::sub4, sub8\n" );
@@ -4118,7 +4119,7 @@ static bool check_sub( PelBufferOps* ref, PelBufferOps* opt, unsigned num_cases 
   bool ok = true;
   for( unsigned i = 0; ok && i < num_cases; i++ )
   {
-    const int width      = rng.getOneOf<int>( { 4, 8, 16, 24, 32, 48, 64, 128 } );
+    const int width      = rng.getOneOf<int>( { 4, 12, 8, 16, 24, 32, 48, 64, 128 } );
     const int height     = rng.get( 1, maxHeight );
     const int src0Stride = ( ( width + 7 ) & ~7 ) + 8 * rng.get( 0, 2 );
     const int src1Stride = ( ( width + 7 ) & ~7 ) + 8 * rng.get( 0, 2 );
@@ -4127,7 +4128,7 @@ static bool check_sub( PelBufferOps* ref, PelBufferOps* opt, unsigned num_cases 
     std::generate( src1, src1 + src1Stride * height, anyPel );
     std::vector<Pel> dstRef( dstStride * height, 0x5a5a ), dstOpt( dstStride * height, 0x5a5a );
 
-    if( width == 4 )
+    if( width & 7 )
     {
       ref->sub4( src0, src0Stride, src1, src1Stride, dstRef.data(), dstStride, width, height );
       opt->sub4( src0, src0Stride, src1, src1Stride, dstOpt.data(), dstStride, width, height );
