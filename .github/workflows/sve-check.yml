@@ -1,0 +1,28 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request), Neoverse N2 / GCC 14
+# and clang: #919 review, variants of the NEON SAO band-offset statistics kernel (vector lanes, u64 lanes, scalar;
+# 8, 4 or 2 tables) against master's kernel. Self-contained bench, three rounds. Never fails the job.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "#919 SAO BO variants on N2 (GCC 14 and clang, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 clang
+      - name: Bench
+        shell: bash
+        run: |
+          lscpu | grep -i -E "model name|^CPU\(s\)" || true
+          g++-14 -O3 -std=c++17 .github/sve-check/bench_saobo_variants.cpp -o /tmp/var_gcc || echo "gcc build failed"
+          clang++ -O3 -std=c++17 .github/sve-check/bench_saobo_variants.cpp -o /tmp/var_clang || echo "clang build failed"
+          clang++ --version | head -1
+          for round in 1 2 3; do
+            echo "== round $round GCC 14"; /tmp/var_gcc || true
+            echo "== round $round clang"; /tmp/var_clang || true
+          done
