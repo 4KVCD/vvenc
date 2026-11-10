@@ -181,6 +181,57 @@ NOINLINE void boScalar( int, int endX, int endY, Pel* srcLine, Pel* orgLine, int
   mergeTables<T>( packed, count, diff );
 }
 
+
+// mixed forms: X = 0 both from u64 with sign extension (lane16), 1 band from u64 / diff by lane, 2 band by lane / diff
+// from u64
+static inline int lane16( uint64_t v, int j )
+{
+  return int16_t( v >> ( 16 * j ) );
+}
+
+template<int X>
+NOINLINE void boMix( int, int endX, int endY, Pel* srcLine, Pel* orgLine, int srcStride, int orgStride, int bd,
+                     int64_t* count, int64_t* diff )
+{
+  const int       shift    = bd - NUM_SAO_BO_CLASSES_LOG2;
+  const int16x8_t negShift = vdupq_n_s16( -shift );
+  int64_t         packed[8][NUM_SAO_BO_CLASSES] = {};
+  do
+  {
+    int x = 0;
+    for( ; x + 8 <= endX; x += 8 )
+    {
+      const int16x8_t src  = vld1q_s16( srcLine + x );
+      const int16x8_t org  = vld1q_s16( orgLine + x );
+      const int16x8_t band = vshlq_s16( src, negShift );
+      const int16x8_t d    = vsubq_s16( org, src );
+      const uint64_t  b0   = vgetq_lane_u64( vreinterpretq_u64_s16( band ), 0 );
+      const uint64_t  b1   = vgetq_lane_u64( vreinterpretq_u64_s16( band ), 1 );
+      const uint64_t  d0   = vgetq_lane_u64( vreinterpretq_u64_s16( d ), 0 );
+      const uint64_t  d1   = vgetq_lane_u64( vreinterpretq_u64_s16( d ), 1 );
+#define BAND( k ) ( X == 2 ? int( vgetq_lane_s16( band, k ) ) : lane16( ( k ) < 4 ? b0 : b1, ( k ) & 3 ) )
+#define DIFF( k ) ( X == 1 ? int( vgetq_lane_s16( d, k ) ) : lane16( ( k ) < 4 ? d0 : d1, ( k ) & 3 ) )
+      addToBand( packed[0], BAND( 0 ), DIFF( 0 ) );
+      addToBand( packed[1], BAND( 1 ), DIFF( 1 ) );
+      addToBand( packed[2], BAND( 2 ), DIFF( 2 ) );
+      addToBand( packed[3], BAND( 3 ), DIFF( 3 ) );
+      addToBand( packed[4], BAND( 4 ), DIFF( 4 ) );
+      addToBand( packed[5], BAND( 5 ), DIFF( 5 ) );
+      addToBand( packed[6], BAND( 6 ), DIFF( 6 ) );
+      addToBand( packed[7], BAND( 7 ), DIFF( 7 ) );
+#undef BAND
+#undef DIFF
+    }
+    for( ; x < endX; ++x )
+    {
+      addToBand( packed[0], srcLine[x] >> shift, orgLine[x] - srcLine[x] );
+    }
+    srcLine += srcStride;
+    orgLine += orgStride;
+  } while( --endY != 0 );
+  mergeTables<8>( packed, count, diff );
+}
+
 static volatile int64_t sink;
 
 int main( int argc, char** argv )
@@ -188,7 +239,8 @@ int main( int argc, char** argv )
   const int W = 1920, H = 1080;
   struct V { const char* name; BoFn fn; };
   const V vars[] = { { "vec8", boVec<8> },   { "vec4", boVec<4> },     { "u64x8", boU64<8> },   { "u64x4", boU64<4> },
-                     { "scal8", boScalar<8> }, { "scal4", boScalar<4> }, { "scal2", boScalar<2> } };
+                     { "scal8", boScalar<8> }, { "scal4", boScalar<4> }, { "scal2", boScalar<2> },
+                     { "u64s8", boMix<0> }, { "u64b8", boMix<1> }, { "u64d8", boMix<2> } };
   const int nv = sizeof( vars ) / sizeof( vars[0] );
   bool allOk = true;
   for( int kind = 0; kind < ( argc > 1 ? 3 : 2 ); kind++ )
