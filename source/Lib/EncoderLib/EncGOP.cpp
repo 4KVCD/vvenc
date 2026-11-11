@@ -2713,7 +2713,7 @@ bool EncGOP::xFilmGrainSeiNeeded( const Slice& slice, const SeiFgc& sei, ChromaF
 }
 
 // The grain the coding of a picture lost, for its film grain SEI: per component, the summed 16x16 DCT spectra of the
-// original's flat blocks and of the reconstruction, per 8-bit block mean (the intensity intervals are known only when the
+// original's smoothest blocks and of the reconstruction, per 8-bit block mean (the intensity intervals are known only when the
 // SEI is written). Runs when the picture is finished, before its reconstruction can be released; only where
 // xScaleToLostGrain uses them (xFitsLostGrain).
 void EncGOP::xStoreLostGrainSpectra( Picture& pic ) const
@@ -2859,13 +2859,13 @@ void EncGOP::xScaleToLostGrain( Picture& pic, const Slice& slice, SeiFgc& sei )
   }
 }
 
-// An interval needs this many pooled flat blocks to be fitted (xFitLostGrain).
+// An interval needs this many pooled blocks to be fitted (xFitLostGrain).
 static constexpr int MIN_POOLED_BLOCKS = 32;
 
 // One shift (dh, dw) >= 0 of every interval's cut-offs toward finer grain, the same for all intervals of the component (so
 // the synthesis's limit on different cut-off pairs still holds), chosen by the blocks-weighted sum of the intervals'
 // FGAnalyzer::lostGrainFit costs; then per interval the scaling factor fitted at the shifted cut-offs, never more grain
-// power than FGAnalyzer::LOST_GRAIN_CAP_POWER times the analyzer's. An interval needs MIN_POOLED_BLOCKS pooled flat blocks
+// power than FGAnalyzer::LOST_GRAIN_CAP_POWER times the analyzer's. An interval needs MIN_POOLED_BLOCKS pooled blocks
 // to be fitted. So that the synthesized grain does not pulse, per picture of a temporal layer the shift moves at most 1 and
 // the scaling factor at most max(1, s0 / 8) (s0 the analyzer's scaling factor) from its last value moved to the new
 // cut-offs at equal power; a picture with nothing to fit keeps the shift, an interval without a fit keeps its last grain

@@ -146,8 +146,9 @@ public:
   void getSignalledParameters( double strength, int& log2ScaleFactor, SeiFgc::CompModel compModel[ MAX_NUM_COMP ] ) const;
 
   // The film grain SEI fitted to the grain the coding lost. lostGrainSpectra: for one component of a coded picture, the
-  // summed 16x16 DCT power of the original's flat blocks and of the same blocks of the reconstruction, per 8-bit block
-  // mean, in ascending order (read by several threads at once: it changes no state).
+  // summed 16x16 DCT power of the original's smoothest blocks (the 30 % with the least low-frequency power per band of
+  // block means) and of the same blocks of the reconstruction, per 8-bit block mean, in ascending order (read by several
+  // threads at once: it changes no state).
   void lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int bitDepth, std::vector<LostGrainSpectrum>& spectra ) const;
   // An intensity interval's summed spectra reduced to the mean power per block in each u + v frequency group of the fit,
   // split by direction (once per interval: it does not depend on the cut-offs tried).

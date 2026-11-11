@@ -2988,17 +2988,41 @@ int FGAnalyzer::limitCutoffPairs( std::vector<CutoffPair>& pairs, int maxUnique 
 // ====================================================================================================================
 
 // Units: squaredDct16 is orthonormal, so the AC power of a block is 256 x its sample variance at the coded bit depth.
-// A block is flat when its five lowest AC coefficients (u + v = 1, 2) carry at most LOST_GRAIN_FLAT_LIMIT times the mean
-// power of its high frequencies (u + v >= 4): there the original's power in the grain's band is mostly grain.
-static constexpr double LOST_GRAIN_FLAT_LIMIT = 4.0;
+// The fit uses the blocks where grain shows: in every band of 8-bit block means (LOST_GRAIN_BAND_EDGES) the 30 % with the
+// least power in the five lowest AC coefficients (u + v = 1, 2), the smoothest areas. The former flat test (u + v = 1, 2
+// power at most 4x the mean of u + v >= 4) kept a noise-dominated minority (gangster_chase: 1-6k blocks per band in 178
+// pictures, against 15-87k smooth ones) that loses 2-3x more fine grain per block, so the fit put back 1.07-1.25x the fine
+// grain the smooth areas lost. Blocks darker than the first edge (digital black) or from the last one (white) are not fitted.
+static constexpr int LOST_GRAIN_BAND_EDGES[] = { 18, 33, 65, 97, 129, 161, 238 };
+static constexpr int LOST_GRAIN_NUM_BANDS    = sizeof( LOST_GRAIN_BAND_EDGES ) / sizeof( LOST_GRAIN_BAND_EDGES[ 0 ] ) - 1;
+
+// The band of an 8-bit block mean, -1: not fitted.
+static int lostGrainBand( int mean8 )
+{
+  if( mean8 < LOST_GRAIN_BAND_EDGES[ 0 ] || mean8 >= LOST_GRAIN_BAND_EDGES[ LOST_GRAIN_NUM_BANDS ] )
+  {
+    return -1;
+  }
+  int band = 0;
+  while( mean8 >= LOST_GRAIN_BAND_EDGES[ band + 1 ] )
+  {
+    band++;
+  }
+  return band;
+}
 
 void FGAnalyzer::lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int bitDepth, std::vector<LostGrainSpectrum>& spectra ) const
 {
   constexpr int N = 16;   // squaredDct16's block size
   const int maxRange = ( 1 << ( bitDepth + 4 ) ) - 1;
-  int slot[ 256 ];        // per 8-bit block mean: its entry in spectra, -1: none yet
-  std::fill_n( slot, 256, -1 );
-  spectra.clear();
+
+  // pass 1: every block's mean and low-frequency power, listed per band
+  struct Block
+  {
+    int x, y, mean8;
+  };
+  std::vector<Block> blocks;
+  std::vector<std::pair<double, size_t>> bandBlocks[ LOST_GRAIN_NUM_BANDS ];   // (low-frequency power, index in blocks)
   for( int y = 0; y + N <= (int) org.height; y += N )
   {
     for( int x = 0; x + N <= (int) org.width; x += N )
@@ -3013,45 +3037,59 @@ void FGAnalyzer::lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int b
         }
       }
       const int mean8 = std::min( 255, (int) ( ( sum + N * N / 2 ) / ( N * N ) ) >> ( bitDepth - BIT_DEPTH_8 ) );
-      double so[ N * N ] = {};
-      m_kernels.squaredDct16( o, org.stride, maxRange, so );
-      double low = 0.0, high = 0.0;
-      int numHigh = 0;
-      for( int u = 0; u < N; u++ )
-      {
-        for( int v = 0; v < N; v++ )
-        {
-          if( u + v >= 1 && u + v <= 2 )
-          {
-            low += so[ u * N + v ];
-          }
-          else if( u + v >= 4 )
-          {
-            high += so[ u * N + v ];
-            numHigh++;
-          }
-        }
-      }
-      if( low / 5 > LOST_GRAIN_FLAT_LIMIT * high / numHigh )
+      const int band  = lostGrainBand( mean8 );
+      if( band < 0 )
       {
         continue;
       }
-      double sr[ N * N ] = {};
-      m_kernels.squaredDct16( rec.bufAt( x, y ), rec.stride, maxRange, sr );
-      if( slot[ mean8 ] < 0 )
-      {
-        slot[ mean8 ] = (int) spectra.size();
-        spectra.emplace_back();
-        spectra.back().mean8 = mean8;
-      }
-      LostGrainSpectrum& s = spectra[ slot[ mean8 ] ];
-      for( int k = 1; k < N * N; k++ )
-      {
-        s.orig[ k ] += so[ k ];
-        s.reco[ k ] += sr[ k ];
-      }
-      s.blocks++;
+      double so[ N * N ] = {};
+      m_kernels.squaredDct16( o, org.stride, maxRange, so );
+      const double low = so[ 1 ] + so[ 2 ] + so[ N ] + so[ N + 1 ] + so[ 2 * N ];   // [u][v] with u + v = 1, 2
+      bandBlocks[ band ].push_back( { low, blocks.size() } );
+      blocks.push_back( { x, y, mean8 } );
     }
+  }
+
+  // the smoothest 30 % of every band (the index breaks ties, so the choice does not depend on the sort)
+  std::vector<uint8_t> selected( blocks.size(), 0 );
+  for( auto& candidates : bandBlocks )
+  {
+    const size_t keep = candidates.size() * 3 / 10;
+    std::nth_element( candidates.begin(), candidates.begin() + keep, candidates.end() );
+    for( size_t k = 0; k < keep; k++ )
+    {
+      selected[ candidates[ k ].second ] = 1;
+    }
+  }
+
+  // pass 2: the spectra of the selected blocks of the original and the reconstruction per 8-bit block mean, summed in
+  // picture order
+  int slot[ 256 ];        // per 8-bit block mean: its entry in spectra, -1: none yet
+  std::fill_n( slot, 256, -1 );
+  spectra.clear();
+  for( size_t i = 0; i < blocks.size(); i++ )
+  {
+    if( !selected[ i ] )
+    {
+      continue;
+    }
+    const Block& b = blocks[ i ];
+    double so[ N * N ] = {}, sr[ N * N ] = {};
+    m_kernels.squaredDct16( org.bufAt( b.x, b.y ), org.stride, maxRange, so );
+    m_kernels.squaredDct16( rec.bufAt( b.x, b.y ), rec.stride, maxRange, sr );
+    if( slot[ b.mean8 ] < 0 )
+    {
+      slot[ b.mean8 ] = (int) spectra.size();
+      spectra.emplace_back();
+      spectra.back().mean8 = b.mean8;
+    }
+    LostGrainSpectrum& s = spectra[ slot[ b.mean8 ] ];
+    for( int k = 1; k < N * N; k++ )
+    {
+      s.orig[ k ] += so[ k ];
+      s.reco[ k ] += sr[ k ];
+    }
+    s.blocks++;
   }
   std::sort( spectra.begin(), spectra.end(), []( const LostGrainSpectrum& a, const LostGrainSpectrum& b ) { return a.mean8 < b.mean8; } );
 }
