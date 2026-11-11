@@ -2919,6 +2919,11 @@ int FGAnalyzer::equalPowerScale( int s, bool chroma420, int h0, int w0, int h, i
   return std::min( MAX_STANDARD_DEVIATION, (int) ( s * amp0 / amp + 0.5 ) );
 }
 
+int FGAnalyzer::lostGrainCapScale( int s0, bool chroma420, int h0, int w0, int h, int w )
+{
+  return std::min( MAX_STANDARD_DEVIATION, (int) ( equalPowerScale( s0, chroma420, h0, w0, h, w ) * std::sqrt( LOST_GRAIN_CAP_POWER ) + 0.5 ) );
+}
+
 // The u + v frequency groups of the fit: 1-2, 3-5, 6-8, 9-12, 13-30 (the group of DCT coefficient k of a 16x16 block).
 static constexpr int LOST_GRAIN_GROUP_END[ FGAnalyzer::LostGrainPower::GROUPS ] = { 2, 5, 8, 12, 30 };
 
@@ -2965,17 +2970,31 @@ FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPower( const double orig[ 256 ],
 }
 
 // The fit compares the reconstruction plus the synthesis with the original per u + v group of the 16x16 DCT. The lowest
-// group (u + v = 1, 2) is left out: there the coding ADDS power (blocking, ringing; nocturne_grain at q23 reconstructs more
-// than the original), so a fit including it pulls the scale down while the fine band stays short.
+// group (u + v = 1, 2) is not fitted: there the coding ADDS power (blocking, ringing; nocturne_grain at q23 reconstructs more
+// than the original), so a fit including it pulls the scale down while the fine band stays short. It only limits the
+// synthesis: coarse grain lifts it too (on Top Gun's dark intervals the synthesis about doubled its power), which reads as
+// grain the coding never lost.
 static constexpr int LOST_GRAIN_FIRST_FITTED_GROUP = 1;
+// Grain put back beyond what the coding lost counts this many times more than grain missing (the coded picture keeps some
+// grain of its own at high rates, so too much is worse than too little); the same weight applies to lifting the lowest group.
+static constexpr double LOST_GRAIN_OVERSHOOT_WEIGHT = 4.0;
 
 // The fit's cost of synthesized grain of variance var whose power per unit variance per group and direction is
-// synthPower: the sum of the squared log ratios of reconstruction plus synthesis to the original over the fitted groups,
-// both directions.
+// synthPower: the lowest group's lift above the larger of the original's and the reconstruction's power, then the squared
+// log ratios of reconstruction plus synthesis to the original over the fitted groups, both directions, overshoot weighted.
 static double lostGrainCost( const FGAnalyzer::LostGrainPower& power, double var,
                              const double synthPower[][ FGAnalyzer::LostGrainPower::DIRECTIONS ] )
 {
   double cost = 0.0;
+  for( int d = 0; d < FGAnalyzer::LostGrainPower::DIRECTIONS; d++ )
+  {
+    const double floor0 = std::max( power.orig[ 0 ][ d ], power.reco[ 0 ][ d ] );
+    if( floor0 > 0 )
+    {
+      const double r = std::log( ( power.reco[ 0 ][ d ] + var * synthPower[ 0 ][ d ] + 1e-9 ) / floor0 );
+      cost += r > 0 ? LOST_GRAIN_OVERSHOOT_WEIGHT * r * r : 0.0;
+    }
+  }
   for( int g = LOST_GRAIN_FIRST_FITTED_GROUP; g < FGAnalyzer::LostGrainPower::GROUPS; g++ )
   {
     for( int d = 0; d < FGAnalyzer::LostGrainPower::DIRECTIONS; d++ )
@@ -2983,7 +3002,7 @@ static double lostGrainCost( const FGAnalyzer::LostGrainPower& power, double var
       if( power.orig[ g ][ d ] > 0 )
       {
         const double r = std::log( ( power.reco[ g ][ d ] + var * synthPower[ g ][ d ] + 1e-9 ) / power.orig[ g ][ d ] );
-        cost += r * r;
+        cost += ( r > 0 ? LOST_GRAIN_OVERSHOOT_WEIGHT : 1.0 ) * r * r;
       }
     }
   }
@@ -3004,7 +3023,7 @@ double FGAnalyzer::lostGrainFit( const LostGrainPower& power, int bitDepth, bool
   h0 = Clip3( 2, 14, h0 ); w0 = Clip3( 2, 14, w0 ); h = Clip3( 2, 14, h ); w = Clip3( 2, 14, w );
   const double unit   = 1.0 / double( 1 << ( log2ScaleFactor + 14 - bitDepth ) );
   const double sigma0 = s0 * PATTERN_STDDEV[ table ][ h0 - 2 ][ w0 - 2 ] * unit;
-  const double power0 = sigma0 * sigma0 * BLOCK_VARIANCE_SHARE[ table ][ h0 - 2 ][ w0 - 2 ];   // the cap: the analyzer's grain
+  const double power0 = sigma0 * sigma0 * BLOCK_VARIANCE_SHARE[ table ][ h0 - 2 ][ w0 - 2 ];   // the analyzer's grain
   const auto&  m      = GRAIN_SPECTRUM_MARGINALS[ table ][ h - 2 ][ w - 2 ];
   double shapeSum = 0.0;
   for( int k = 1; k < N * N; k++ )
@@ -3027,7 +3046,7 @@ double FGAnalyzer::lostGrainFit( const LostGrainPower& power, int bitDepth, bool
   for( int s = 0; s <= MAX_STANDARD_DEVIATION; s++ )
   {
     const double var = ( s * sigmaUnit ) * ( s * sigmaUnit );
-    if( var * share > power0 * ( 1.0 + 1e-9 ) )
+    if( var * share > power0 * LOST_GRAIN_CAP_POWER * ( 1.0 + 1e-9 ) )
     {
       break;
     }

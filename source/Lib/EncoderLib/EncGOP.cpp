@@ -2865,11 +2865,11 @@ static constexpr int MIN_POOLED_BLOCKS = 32;
 // One shift (dh, dw) >= 0 of every interval's cut-offs toward finer grain, the same for all intervals of the component (so
 // the synthesis's limit on different cut-off pairs still holds), chosen by the blocks-weighted sum of the intervals'
 // FGAnalyzer::lostGrainFit costs; then per interval the scaling factor fitted at the shifted cut-offs, never more grain
-// power than the analyzer's. An interval needs MIN_POOLED_BLOCKS pooled flat blocks to be fitted. So that the synthesized
-// grain does not pulse, per picture of a temporal layer the shift moves at most 1 and the scaling factor at most
-// max(1, s0 / 8) (s0 the analyzer's scaling factor) from its last value moved to the new cut-offs at equal power; a
-// picture with nothing to fit keeps the shift, an interval without a fit keeps its last grain power (at first the
-// analyzer's).
+// power than FGAnalyzer::LOST_GRAIN_CAP_POWER times the analyzer's. An interval needs MIN_POOLED_BLOCKS pooled flat blocks
+// to be fitted. So that the synthesized grain does not pulse, per picture of a temporal layer the shift moves at most 1 and
+// the scaling factor at most max(1, s0 / 8) (s0 the analyzer's scaling factor) from its last value moved to the new
+// cut-offs at equal power; a picture with nothing to fit keeps the shift, an interval without a fit keeps its last grain
+// power (at first the analyzer's).
 void EncGOP::xFitLostGrain( int c, unsigned layer, int bitDepth, bool chroma420, int log2ScaleFactor,
                             const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm )
 {
@@ -2932,13 +2932,14 @@ void EncGOP::xFitLostGrain( int c, unsigned layer, int bitDepth, bool chroma420,
   {
     SeiFgc::CompModelIntensityValues& iv = cm.intensityValues[ i ];
     const int h = std::min( MAX_CUTOFF, h0[ i ] + dh ), w = std::min( MAX_CUTOFF, w0[ i ] + dw );
-    const int cap = FGAnalyzer::equalPowerScale( s0[ i ], chroma420, h0[ i ], w0[ i ], h, w );   // the analyzer's grain power
+    const int analyzerScale = FGAnalyzer::equalPowerScale( s0[ i ], chroma420, h0[ i ], w0[ i ], h, w );   // the analyzer's power
+    const int cap           = FGAnalyzer::lostGrainCapScale( s0[ i ], chroma420, h0[ i ], w0[ i ], h, w );
     const LostGrainKey key( c, iv.intensityIntervalLowerBound, iv.intensityIntervalUpperBound, layer );
     // the interval's last value moved to the new cut-offs at equal power; before its first fit, the analyzer's grain, which
     // is not recorded: the first fit is then free instead of starting max(1, s0 / 8) per picture down from the analyzer's
     const auto last   = m_lostGrainFitted.find( key );
     const bool fitted = last != m_lostGrainFitted.end();
-    const int  held   = fitted ? FGAnalyzer::equalPowerScale( last->second.scale, chroma420, last->second.h, last->second.w, h, w ) : cap;
+    const int  held   = fitted ? FGAnalyzer::equalPowerScale( last->second.scale, chroma420, last->second.h, last->second.w, h, w ) : analyzerScale;
     int  scale = held;
     int  fit;
     const bool fits = power[ i ].blocks >= MIN_POOLED_BLOCKS

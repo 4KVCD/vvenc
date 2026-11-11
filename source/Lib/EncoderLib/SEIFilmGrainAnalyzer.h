@@ -162,12 +162,19 @@ public:
   static LostGrainPower lostGrainPower( const double orig[ 256 ], const double reco[ 256 ], int blocks );
   // The scaling factor (0 .. MAX_STANDARD_DEVIATION) at cut-offs (h, w) whose synthesized grain, added to the
   // reconstruction, best matches the original's power per u + v frequency group and direction (least squares of the log
-  // ratio); the synthesized power is capped at that of the analyzer's scale s0 at its cut-offs (h0, w0). Returns the cost,
-  // -1: nothing to fit.
+  // ratio, overshoot weighted); the synthesized power is capped at LOST_GRAIN_CAP_POWER times that of the analyzer's scale s0
+  // at its cut-offs (h0, w0). Returns the cost, -1: nothing to fit.
   static double lostGrainFit( const LostGrainPower& power, int bitDepth, bool chroma420, int log2ScaleFactor, int s0, int h0,
                               int w0, int h, int w, int& scale );
   // The scaling factor at cut-offs (h, w) whose synthesized in-block power equals that of scale s at (h0, w0).
   static int equalPowerScale( int s, bool chroma420, int h0, int w0, int h, int w );
+  // The lost-grain fit may put back up to this many times the analyzer's grain power: the coding can lose more than that
+  // (at 1x the cap held the fit in 30-62 % of the intervals; on Top Gun 57622 the medium band got 0.57-0.70 of its lost
+  // power back at 1x, 0.67-0.82 at 2x with the overshoot-weighted cost).
+  static constexpr double LOST_GRAIN_CAP_POWER = 2.0;
+  // The largest scaling factor the fit may give at cut-offs (h, w): LOST_GRAIN_CAP_POWER times the power of the analyzer's
+  // scale s0 at (h0, w0).
+  static int lostGrainCapScale( int s0, bool chroma420, int h0, int w0, int h, int w );
 
   // A plane of samples with its own storage; the analysis works on whole planes.
   struct Plane
