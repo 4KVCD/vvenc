@@ -258,6 +258,7 @@ private:
   Plane             m_mask    [ MAX_NUM_COMP ];   // non-zero where the picture is not flat
   std::vector<uint8_t> m_motionFailed[ MAX_NUM_COMP ];   // per 16x16 block: the temporal residual's compensation failed
   std::vector<double> m_repeatedGrainRatio[ MAX_NUM_COMP ];   // per intensity bin: grain variance per variance the residual sees
+  std::vector<int>  m_plateaus;   // luma values of the picture's grain-free plateaus (findPlateaus), most blocks first
 
   // Scratch planes and lists of the mask search, kept to avoid allocating and clearing them for every picture.
   struct Scratch
@@ -288,6 +289,7 @@ private:
   void setEstimatedParameters( std::vector<int>& quantizedVec, int bitDepth, ComponentID compId );
   void holdDarkStrength      ( std::vector<int>& quantizedVec, int bitDepth ) const;
   void mergeIntervals        ( std::vector<std::vector<int>>& parameters, int bitDepth ) const;
+  void cutPlateauHoles       ( std::vector<std::vector<int>>& parameters, int bitDepth ) const;
   void scaleDown             ( std::vector<std::vector<int>>& parameters, int bitDepth ) const;
 
   void getVtmParameters      ( double strength, int& log2ScaleFactor, SeiFgc::CompModel compModel[ MAX_NUM_COMP ] ) const;
