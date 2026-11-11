@@ -2933,6 +2933,17 @@ static int lostGrainGroup( int k )
   return g;
 }
 
+// The fit also tells the two directions apart: the share of coefficient k (u = k / 16 horizontal, v = k % 16 vertical
+// frequency) in direction 0 (u > v: detail that varies along x); the diagonal (u == v) counts half in each. Grain whose
+// cut-offs (h, w) are swapped has the same power per u + v group, so a fit by u + v alone picks the shift (dh, dw) or its
+// transpose by chance and can synthesize grain stretched across the lost grain's direction (streaks): on the fast preset's
+// q23 film scan bk_1191 the coding lost fine-band grain at x / y 0.47-0.93 and the synthesis put it back at 1.39-1.89.
+static double lostGrainHorizontalShare( int k )
+{
+  const int u = k / 16, v = k % 16;
+  return u > v ? 1.0 : u < v ? 0.0 : 0.5;
+}
+
 FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPower( const double orig[ 256 ], const double reco[ 256 ], int blocks )
 {
   LostGrainPower p;
@@ -2943,9 +2954,12 @@ FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPower( const double orig[ 256 ],
   }
   for( int k = 1; k < 256; k++ )
   {
-    const int g = lostGrainGroup( k );
-    p.orig[ g ] += orig[ k ] / blocks;
-    p.reco[ g ] += reco[ k ] / blocks;
+    const int    g  = lostGrainGroup( k );
+    const double wx = lostGrainHorizontalShare( k );
+    p.orig[ g ][ 0 ] += wx * orig[ k ] / blocks;
+    p.orig[ g ][ 1 ] += ( 1.0 - wx ) * orig[ k ] / blocks;
+    p.reco[ g ][ 0 ] += wx * reco[ k ] / blocks;
+    p.reco[ g ][ 1 ] += ( 1.0 - wx ) * reco[ k ] / blocks;
   }
   return p;
 }
@@ -2955,17 +2969,22 @@ FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPower( const double orig[ 256 ],
 // than the original), so a fit including it pulls the scale down while the fine band stays short.
 static constexpr int LOST_GRAIN_FIRST_FITTED_GROUP = 1;
 
-// The fit's cost of synthesized grain of variance var whose power per unit variance per group is synthPower: the sum of
-// the squared log ratios of reconstruction plus synthesis to the original over the fitted groups.
-static double lostGrainCost( const FGAnalyzer::LostGrainPower& power, double var, const double synthPower[] )
+// The fit's cost of synthesized grain of variance var whose power per unit variance per group and direction is
+// synthPower: the sum of the squared log ratios of reconstruction plus synthesis to the original over the fitted groups,
+// both directions.
+static double lostGrainCost( const FGAnalyzer::LostGrainPower& power, double var,
+                             const double synthPower[][ FGAnalyzer::LostGrainPower::DIRECTIONS ] )
 {
   double cost = 0.0;
   for( int g = LOST_GRAIN_FIRST_FITTED_GROUP; g < FGAnalyzer::LostGrainPower::GROUPS; g++ )
   {
-    if( power.orig[ g ] > 0 )
+    for( int d = 0; d < FGAnalyzer::LostGrainPower::DIRECTIONS; d++ )
     {
-      const double r = std::log( ( power.reco[ g ] + var * synthPower[ g ] + 1e-9 ) / power.orig[ g ] );
-      cost += r * r;
+      if( power.orig[ g ][ d ] > 0 )
+      {
+        const double r = std::log( ( power.reco[ g ][ d ] + var * synthPower[ g ][ d ] + 1e-9 ) / power.orig[ g ][ d ] );
+        cost += r * r;
+      }
     }
   }
   return cost;
@@ -2992,12 +3011,16 @@ double FGAnalyzer::lostGrainFit( const LostGrainPower& power, int bitDepth, bool
   {
     shapeSum += m[ 0 ][ k / N ] * m[ 1 ][ k % N ];
   }
-  // per group: the synthesis's power per unit grain variance (the original's and the reconstruction's mean power: power)
-  double ps[ GROUPS ] = {};
+  // per group and direction: the synthesis's power per unit grain variance (the original's and the reconstruction's mean
+  // power: power)
+  double ps[ GROUPS ][ LostGrainPower::DIRECTIONS ] = {};
   const double share = BLOCK_VARIANCE_SHARE[ table ][ h - 2 ][ w - 2 ];
   for( int k = 1; k < N * N; k++ )
   {
-    ps[ lostGrainGroup( k ) ] += N * N * share * m[ 0 ][ k / N ] * m[ 1 ][ k % N ] / shapeSum;
+    const double p  = N * N * share * m[ 0 ][ k / N ] * m[ 1 ][ k % N ] / shapeSum;
+    const double wx = lostGrainHorizontalShare( k );
+    ps[ lostGrainGroup( k ) ][ 0 ] += wx * p;
+    ps[ lostGrainGroup( k ) ][ 1 ] += ( 1.0 - wx ) * p;
   }
   const double sigmaUnit = PATTERN_STDDEV[ table ][ h - 2 ][ w - 2 ] * unit;
   double best = -1.0;

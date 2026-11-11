@@ -149,20 +149,21 @@ public:
   // summed 16x16 DCT power of the original's flat blocks and of the same blocks of the reconstruction, per 8-bit block
   // mean, in ascending order (read by several threads at once: it changes no state).
   void lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int bitDepth, std::vector<LostGrainSpectrum>& spectra ) const;
-  // An intensity interval's summed spectra reduced to the mean power per block in each u + v frequency group of the fit
-  // (once per interval: it does not depend on the cut-offs tried).
+  // An intensity interval's summed spectra reduced to the mean power per block in each u + v frequency group of the fit,
+  // split by direction (once per interval: it does not depend on the cut-offs tried).
   struct LostGrainPower
   {
-    static constexpr int GROUPS = 5;
-    double orig[ GROUPS ] = {};
-    double reco[ GROUPS ] = {};
-    int    blocks         = 0;
+    static constexpr int GROUPS     = 5;
+    static constexpr int DIRECTIONS = 2;   // 0: horizontal frequency dominates (u > v), 1: vertical (v > u)
+    double orig[ GROUPS ][ DIRECTIONS ] = {};
+    double reco[ GROUPS ][ DIRECTIONS ] = {};
+    int    blocks                       = 0;
   };
   static LostGrainPower lostGrainPower( const double orig[ 256 ], const double reco[ 256 ], int blocks );
   // The scaling factor (0 .. MAX_STANDARD_DEVIATION) at cut-offs (h, w) whose synthesized grain, added to the
-  // reconstruction, best matches the original's power per u + v frequency group (least squares of the log ratio); the
-  // synthesized power is capped at that of the analyzer's scale s0 at its cut-offs (h0, w0). Returns the cost, -1: nothing
-  // to fit.
+  // reconstruction, best matches the original's power per u + v frequency group and direction (least squares of the log
+  // ratio); the synthesized power is capped at that of the analyzer's scale s0 at its cut-offs (h0, w0). Returns the cost,
+  // -1: nothing to fit.
   static double lostGrainFit( const LostGrainPower& power, int bitDepth, bool chroma420, int log2ScaleFactor, int s0, int h0,
                               int w0, int h, int w, int& scale );
   // The scaling factor at cut-offs (h, w) whose synthesized in-block power equals that of scale s at (h0, w0).
