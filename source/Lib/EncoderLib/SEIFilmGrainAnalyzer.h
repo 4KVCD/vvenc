@@ -170,9 +170,10 @@ public:
   // The scaling factor at cut-offs (h, w) whose synthesized in-block power equals that of scale s at (h0, w0).
   static int equalPowerScale( int s, bool chroma420, int h0, int w0, int h, int w );
   // The lost-grain fit may put back up to this many times the analyzer's grain power: the coding can lose more than that
-  // (at 1x the cap held the fit in 30-62 % of the intervals; on Top Gun 57622 the medium band got 0.57-0.70 of its lost
-  // power back at 1x, 0.67-0.82 at 2x with the overshoot-weighted cost).
-  static constexpr double LOST_GRAIN_CAP_POWER = 2.0;
+  // (the analyzer's scale falls toward bright areas while the lost grain does not). At 2x Top Gun's mid-bright band
+  // (8-bit 97-128) got back 0.68-0.76 of its lost fine grain and 0.52-0.56 of its medium grain, at 4x 0.93-0.94 and
+  // 0.71-0.72; the overshoot-weighted cost still holds the fit where it is not bound.
+  static constexpr double LOST_GRAIN_CAP_POWER = 4.0;
   // The largest scaling factor the fit may give at cut-offs (h, w): LOST_GRAIN_CAP_POWER times the power of the analyzer's
   // scale s0 at (h0, w0).
   static int lostGrainCapScale( int s0, bool chroma420, int h0, int w0, int h, int w );
