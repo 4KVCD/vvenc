@@ -4578,6 +4578,35 @@ static bool check_sub( PelBufferOps* ref, PelBufferOps* opt, unsigned num_cases 
   return ok;
 }
 
+// sub4 serves the widths that are a multiple of 4 but not of 8 (PelBuf::subtract), so 12, 20, ... as well as 4.
+static bool check_sub4( PelBufferOps* ref, PelBufferOps* opt, unsigned num_cases )
+{
+  printf( "Testing PelBufferOps::sub4\n" );
+  DimensionGenerator rng;
+  auto anyPel = []() { return Pel( ( rand() << 8 ) ^ rand() ); };
+
+  for( unsigned i = 0; i < num_cases; i++ )
+  {
+    const int width  = 4 + 8 * rng.get( 0, 7 );
+    const int height = rng.get( 1, 16 );
+    const int stride = width + rng.get( 0, 8 );
+    std::vector<Pel> src0( stride * height ), src1( stride * height );
+    std::generate( src0.begin(), src0.end(), anyPel );
+    std::generate( src1.begin(), src1.end(), anyPel );
+    std::vector<Pel> dstRef( stride * height, 0x5a5a ), dstOpt( stride * height, 0x5a5a );
+
+    ref->sub4( src0.data(), stride, src1.data(), stride, dstRef.data(), stride, width, height );
+    opt->sub4( src0.data(), stride, src1.data(), stride, dstOpt.data(), stride, width, height );
+    std::ostringstream sstm;
+    sstm << "sub4 " << width << "x" << height << " stride=" << stride;
+    if( !compare_values_1d( sstm.str(), dstRef.data(), dstOpt.data(), stride * height ) )
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Block statistics: sumSquaredError, sum and sumAndSumSquares over random sizes and strides; sample values up to
 // 15 bit (the documented range of the SIMD sums of squares) plus one case of differences of -32768, and signed 16-bit
 // values for the sums.
@@ -5261,6 +5290,7 @@ static bool test_PelBufferOps()
   passed = check_copyClipScalarTail( &ref, num_cases ) && passed;
   passed = check_width2Ops( &ref, &opt, num_cases ) && passed;
   passed = check_sub( &ref, &opt, num_cases ) && passed;
+  passed = check_sub4( &ref, &opt, num_cases ) && passed;
   passed = check_pictureChecksum( &ref, &opt, num_cases ) && passed;
   passed = check_blockStatistics( &ref, &opt, num_cases ) && passed;
   passed = check_sumSquaredErrorParts( &ref, &opt, num_cases ) && passed;
