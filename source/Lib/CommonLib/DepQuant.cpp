@@ -517,8 +517,6 @@ namespace DQIntern
   void RateEstimator::initCtx( const TUParameters& tuPars, const TransformUnit& tu, const ComponentID compID, const FracBitsAccess& fracBitsAccess,
                                RateTablesMemo& memo )
   {
-    m_scanId2Pos = tuPars.m_scanId2BlkPos;
-
     // The sig and gtx tables depend only on the channel type and the states of the coefficient-coding contexts. The
     // memo keeps, per channel type, the last tables built and the raw context bytes they came from: when those are
     // unchanged, as they mostly are, the kept tables are still valid. The result is identical to building them every time.
@@ -1110,6 +1108,10 @@ struct DepQuant::PointerKernels
   {
     dq.m_checkAllRdCosts( spt, pqData, decisions, state );
   }
+  static void checkAllRdCostsGe4( const DepQuant& dq, const DQIntern::ScanPosType spt, const DQIntern::PQData* pqData, DQIntern::Decisions& decisions, const DQIntern::StateMem& state )
+  {
+    dq.m_checkAllRdCostsGe4( spt, pqData, decisions, state );
+  }
   static void checkAllRdCostsOdd1( const DepQuant& dq, const DQIntern::ScanPosType spt, const int64_t pq_a_dist, const int64_t pq_b_dist, DQIntern::Decisions& decisions, const DQIntern::StateMem& state )
   {
     dq.m_checkAllRdCostsOdd1( spt, pq_a_dist, pq_b_dist, decisions, state );
@@ -1294,6 +1296,7 @@ DepQuant::DepQuant( const Quant* other, bool enc, bool useScalingLists, bool ena
   }
 
   m_checkAllRdCosts     = DQIntern::checkAllRdCosts;
+  m_checkAllRdCostsGe4  = DQIntern::checkAllRdCosts;   // the scalar checks add the Rice code's bits themselves
   m_checkAllRdCostsOdd1 = DQIntern::checkAllRdCostsOdd1;
   m_updateStatesEOS     = DQIntern::updateStatesEOS;
   m_updateStates        = DQIntern::updateStates;

@@ -192,9 +192,10 @@ namespace DQIntern
       return m_tables->sig[std::max(((int) stateId) - 1, 0)];
     }
     inline const CoeffFracBits *gtxFracBits() const { return m_tables->gtx; }
-    inline int32_t              lastOffset(unsigned scanIdx) const
+    // the bits of coding the last position at this scan position, from the position the trellis already holds
+    inline int32_t              lastOffset( const ScanInfo& scanInfo ) const
     {
-      return m_lastBitsX[m_scanId2Pos[scanIdx].x] + m_lastBitsY[m_scanId2Pos[scanIdx].y];
+      return m_lastBitsX[scanInfo.posX] + m_lastBitsY[scanInfo.posY];
     }
 
   private:
@@ -224,7 +225,6 @@ namespace DQIntern
     void  xSetSigFlagBits     ( const FracBitsAccess& fracBitsAccess, ChannelType chType, RateTables& tables );
     void  xSetGtxFlagBits     ( const FracBitsAccess& fracBitsAccess, ChannelType chType, RateTables& tables );
 
-    const ScanElement * m_scanId2Pos;
     int32_t             m_lastBitsX      [ MAX_TB_SIZEY ];
     int32_t             m_lastBitsY      [ MAX_TB_SIZEY ];
     const RateTables*   m_tables = nullptr;   // the tables of the current block's channel type, held in the memo
@@ -533,6 +533,8 @@ private:
 public:
   // has to be called as a first check, assumes no decision has been made yet!!!
   void( *m_checkAllRdCosts )( const DQIntern::ScanPosType spt, const DQIntern::PQData* pqData, DQIntern::Decisions& decisions, const DQIntern::StateMem& state );
+  // as m_checkAllRdCosts, where a level may be 4 or more: its bits then include the Rice code of the state's m_goRicePar
+  void( *m_checkAllRdCostsGe4 )( const DQIntern::ScanPosType spt, const DQIntern::PQData* pqData, DQIntern::Decisions& decisions, const DQIntern::StateMem& state );
   // has to be called as a first check, assumes no decision has been made yet!!!
   void( *m_checkAllRdCostsOdd1 )( const DQIntern::ScanPosType spt, const int64_t pq_a_dist, const int64_t pq_b_dist, DQIntern::Decisions& decisions, const DQIntern::StateMem& state );
   void( *m_updateStates )( const DQIntern::ScanInfo& scanInfo, const DQIntern::Decisions& decisions, DQIntern::StateMem& curr );
