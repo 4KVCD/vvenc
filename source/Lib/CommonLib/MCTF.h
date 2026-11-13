@@ -200,9 +200,18 @@ private:
   int                   m_searchPttrn     = 0;
   double                m_filterStrength[VVENC_MAX_MCTF_FRAMES];   // the strength the encoding's filter uses, per MCTF index
   int                   m_mctfUnitSize;
-  FgaTemporalResidual   m_fgaResidual;      // grain measurement of the improved film grain analysis (--fga 2)
+  FgaRowKernels         m_fgaKernels;       // the temporal residual of the improved film grain analysis (--fga 2)
 
   void subsampleLuma    (const PelStorage &input, PelStorage &output, const int factor = 2) const;
+
+  // The temporal residual of the film grain for the improved analysis (--fga 2) of the picture orig with POC poc, from
+  // its neighbours POC - 1 and POC + 1 in picFifo, motion compensated with the vectors estimated for the filter (their
+  // entries in srcFrameInfo).
+  // Returns the variance of the residual relative to the grain variance: 6 with both neighbours, 2 with one, and 0,
+  // with no residual made, with none.
+  int  fgaTemporalResidual( const PelStorage& orig, int poc, const std::deque<Picture*>& picFifo,
+                            const std::deque<TemporalFilterSourcePicInfo>& srcFrameInfo,
+                            PelStorage& residual ) const;
 
   // refMargin is the width of the replicated border around the reference frame buffer.
   int motionErrorLuma   (const PelStorage &orig, const PelStorage &buffer, const int refMargin, const int x, const int y, int dx, int dy, const int bs, const int besterror) const;
