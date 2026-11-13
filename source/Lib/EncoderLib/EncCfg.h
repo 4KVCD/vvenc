@@ -109,6 +109,7 @@ struct VVEncCfg : public vvenc_config
   int       m_configuredQP;     // the QP as configured; m_QP is the coding QP (getCodingQp)
   double    m_QPFraction;       // m_QPFraction in QP units (0 <= value < 1)
   double    m_fgaStrength;      // Film grain strength as the fraction of the analysed strength (0 <= value <  4)
+  int       m_fgaInterval;      // Film grain analysis interval in pictures, 1 << m_fgaIntervalLog2 (automatic: the GOP size)
 
 
 private:

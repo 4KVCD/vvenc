@@ -806,7 +806,9 @@ typedef struct vvenc_config
                                                                                          // in place of the temporal layers' QP offsets, scaled by this 5-bit fixed point value (default 0: off),
                                                                                          // e.g. VVENC_SET_CUTREE_PIC_STRENGTH(2.0); the encoder then codes at QP + round( 3 + 2 * strength ),
                                                                                          // to offset the lower QPs of the referenced pictures (calibrated at strength 2, GOP 32)
-  int32_t             m_reservedInt32;
+  int8_t              m_reservedInt8_3[1];
+  int8_t              m_fgaIntervalLog2;                                                 // Film grain analysis interval: v >= 0 also analyses every (1 << v)-th picture of a GOP by its position, 1 << v must divide the GOP size (default -1: automatic, the GOP's first picture only); the GOP's first picture is always analysed
+  int8_t              m_reservedInt8_4[2];
   double              m_reservedDouble[7];
 
   // internal state variables
