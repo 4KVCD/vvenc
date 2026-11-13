@@ -917,14 +917,39 @@ void IntraPrediction::xFillReferenceSamples( const CPelBuf& recoBuf, Pel* refBuf
         Pel*  ptrDst    = refBufUnfiltered;
   const Pel   valueDC   = 1 << (sps.bitDepths[ chType ] - 1);
 
-  // srcRef: the top-left reference sample, left row r at srcRef[r * srcStride]. The above row with that corner, srcTop[c], lies
-  // at a CTU top in the CTU line above, which may be deblocked meanwhile: it is read as that line was encoded.
-  const Pel* srcRef = srcBuf - ( 1 + multiRefIdx ) * srcStride - ( 1 + multiRefIdx );
-  const Pel* srcTop = srcRef;
-  if( area.y > 0 && ( area.y & ( ( pcv.maxCUSize >> getComponentScaleY( area.compID, sps.chromaFormatIdc ) ) - 1 ) ) == 0 )
+  // srcTop[c]: the above row from the top-left reference sample on (c = 0: that corner); srcLeft[( r - 1 ) * leftStride]: the
+  // left row r >= 1 below that corner. At a CTU top the above row lies in the CTU line above, which may be deblocked meanwhile:
+  // it is read as that line was encoded. Likewise, at a CTU's left edge, the left column and the above row's corner columns lie
+  // in the CTU to the left (when available: in the same tile).
+  const int  ctuWidth   = pcv.maxCUSize >> getComponentScaleX( area.compID, sps.chromaFormatIdc );
+  const int  ctuHeight  = pcv.maxCUSize >> getComponentScaleY( area.compID, sps.chromaFormatIdc );
+  const int  refOffset  = 1 + multiRefIdx;
+  const Pel* srcTop     = srcBuf - refOffset * srcStride - refOffset;
+  const Pel* srcLeft    = srcTop + srcStride;
+  int        leftStride = srcStride;
+  const bool ctuTopRow  = ( area.y & ( ctuHeight - 1 ) ) == 0;   // also in the picture's first line
+  if( ctuTopRow && area.y > 0 )
   {
     CHECKD( multiRefIdx, "multiple reference lines at a CTU top" );
     srcTop = cs.picture->getRecoAboveCtuTop( CompArea( area.compID, area.chromaFormat, Position( area.x - 1, area.y - 1 ), Size( predSize + 1, 1 ) ) ).buf;
+  }
+  if( area.x > 0 && ( area.x & ( ctuWidth - 1 ) ) == 0 )
+  {
+    // the left rows from row 1 to the CTU line's bottom (the units below the line are never available), and below a CTU top,
+    // if the corner is available, the corner's row too
+    const bool    withCorner = !ctuTopRow && m_neighborFlags[totalLeftUnits];
+    const int     top        = area.y - multiRefIdx - ( withCorner ? 1 : 0 );
+    const int     bottom     = std::min<int>( ( area.y / ctuHeight + 1 ) * ctuHeight, cs.picture->blocks[area.compID].height );
+    const CPelBuf left       = cs.picture->getRecoLeftOfCtu( CompArea( area.compID, area.chromaFormat, Position( area.x - refOffset, top ), Size( refOffset, bottom - top ) ) );
+    leftStride = left.stride;
+    srcLeft    = withCorner ? left.buf + leftStride : left.buf;
+    if( withCorner )
+    {
+      // the above row: its corner columns from the CTU to the left, the rest from the reconstruction
+      memcpy( m_aboveRowAtCtuLeft, srcTop, ( predSize + refOffset ) * sizeof( Pel ) );
+      memcpy( m_aboveRowAtCtuLeft, left.buf, refOffset * sizeof( Pel ) );
+      srcTop = m_aboveRowAtCtuLeft;
+    }
   }
 
   if( m_numIntraNeighbor == 0 )
@@ -940,7 +965,7 @@ void IntraPrediction::xFillReferenceSamples( const CPelBuf& recoBuf, Pel* refBuf
     ptrDst[predStride] = srcTop[0];
     for (int i = 1; i <= predHSize + multiRefIdx; i++)
     {
-      ptrDst[i + predStride] = srcRef[i * srcStride];
+      ptrDst[i + predStride] = srcLeft[( i - 1 ) * leftStride];
     }
   }
   else // reference samples are partially available
@@ -948,7 +973,7 @@ void IntraPrediction::xFillReferenceSamples( const CPelBuf& recoBuf, Pel* refBuf
     // Substitution in scan order: up the left column (below-left first), the top-left corner, then along the above row.
     // A unit that is not available takes the last sample before it, the units before the first available one the first
     // sample of that one. Units are handled in runs of equal availability, each run with one copy or one fill.
-    // left row r >= 1: srcRef[r * srcStride], above column c (row 0, the corner c = 0): srcTop[c]
+    // left row r >= 1: srcLeft[( r - 1 ) * leftStride], above column c (row 0, the corner c = 0): srcTop[c]
     Pel* const dstLeft = refBufUnfiltered + predStride;
     Pel* const dstTop  = refBufUnfiltered;
     const bool* flags  = m_neighborFlags;
@@ -964,8 +989,8 @@ void IntraPrediction::xFillReferenceSamples( const CPelBuf& recoBuf, Pel* refBuf
     {
       firstAvail++;
     }
-    Pel last = firstAvail < totalLeftUnits  ? srcRef[leftBottom( firstAvail ) * srcStride]
-             : firstAvail == totalLeftUnits ? ( multiRefIdx ? srcRef[multiRefIdx * srcStride] : srcTop[0] )
+    Pel last = firstAvail < totalLeftUnits  ? srcLeft[( leftBottom( firstAvail ) - 1 ) * leftStride]
+             : firstAvail == totalLeftUnits ? ( multiRefIdx ? srcLeft[( multiRefIdx - 1 ) * leftStride] : srcTop[0] )
              :                                srcTop[aboveFirst( firstAvail )];
 
     int u = 0;
@@ -981,7 +1006,7 @@ void IntraPrediction::xFillReferenceSamples( const CPelBuf& recoBuf, Pel* refBuf
       {
         for( int r = top; r <= bottom; r++ )
         {
-          dstLeft[r] = srcRef[r * srcStride];
+          dstLeft[r] = srcLeft[( r - 1 ) * leftStride];
         }
         last = dstLeft[top];
       }
@@ -997,7 +1022,7 @@ void IntraPrediction::xFillReferenceSamples( const CPelBuf& recoBuf, Pel* refBuf
     {
       for( int i = 0; i <= multiRefIdx; i++ )
       {
-        dstLeft[i] = i ? srcRef[i * srcStride] : srcTop[0];
+        dstLeft[i] = i ? srcLeft[( i - 1 ) * leftStride] : srcTop[0];
         dstTop [i] = srcTop[i];
       }
       last = dstTop[multiRefIdx];
@@ -1278,6 +1303,32 @@ void IntraPrediction::loadLMLumaRecPels(const CodingUnit& cu, const CompArea& ch
   if( aboveIsAvailable && ( cu.intraDir[1] == MDLM_L_IDX || cu.intraDir[1] == MDLM_T_IDX ) )
   {
     addedAboveRight = avaiAboveRightUnits * chromaUnitWidth;
+  }
+
+  // At a CTU's left edge the luma columns left of the block lie in the CTU to the left, which may be deblocked meanwhile: the
+  // reads below then come from a copy that takes them as they were encoded (at a CTU top, the row above comes from the kept
+  // CTU-line bottoms, below)
+  if( leftIsAvailable && ( lumaArea.x & ( cu.cs->sps->CTUSize - 1 ) ) == 0 )
+  {
+    const PreCalcValues& pcv = *cu.cs->pcv;
+    const bool mdlm          = cu.intraDir[1] == MDLM_L_IDX || cu.intraDir[1] == MDLM_T_IDX;
+    const int  rowsAbove     = aboveIsAvailable && !isFirstRowOfCtu ? LM_COPY_ROWS_ABOVE : 0;
+    // as far as the reads reach: the above row and the left column with MDLM's extensions, inside this CTU and its line
+    const int  cols          = std::min<int>( ( uiCWidth  + addedAboveRight ) << logSubWidthC,
+                                              std::min<int>( lumaArea.x + pcv.maxCUSize, pcv.lumaWidth ) - lumaArea.x );
+    const int  rows          = std::min<int>( ( uiCHeight + ( mdlm ? avaiLeftBelowUnits * chromaUnitHeight : 0 ) ) << logSubHeightC,
+                                              std::min<int>( ( lumaArea.y >> pcv.maxCUSizeLog2 << pcv.maxCUSizeLog2 ) + pcv.maxCUSize, pcv.lumaHeight ) - lumaArea.y );
+    Pel* const     copy = m_lumaAtCtuLeft + LM_COPY_ROWS_ABOVE * LM_COPY_STRIDE + LM_COPY_COLS_LEFT;
+    const CPelBuf  left = cu.cs->picture->getRecoLeftOfCtu( CompArea( COMP_Y, cu.chromaFormat, Position( lumaArea.x - LM_COPY_COLS_LEFT, lumaArea.y - rowsAbove ),
+                                                                      Size( LM_COPY_COLS_LEFT, rowsAbove + rows ) ) );
+    for( int r = -rowsAbove; r < rows; r++ )
+    {
+      memcpy( copy + r * LM_COPY_STRIDE - LM_COPY_COLS_LEFT, left.buf + ( r + rowsAbove ) * left.stride, LM_COPY_COLS_LEFT * sizeof( Pel ) );
+      memcpy( copy + r * LM_COPY_STRIDE, pRecSrc0 + r * iRecStride, cols * sizeof( Pel ) );
+    }
+    pRecSrc0    = copy;
+    iRecStride  = LM_COPY_STRIDE;
+    iRecStride2 = iRecStride << logSubHeightC;
   }
 
   // the luma row above, read by the above row and, with vertically collocated 4:2:0 chroma, by the first row of the left

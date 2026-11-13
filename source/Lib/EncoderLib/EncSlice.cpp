@@ -278,6 +278,8 @@ void EncSlice::init( const VVEncCfg& encCfg,
   // the bottom rows of every CTU line one after another; the margin holds the top-left samples left of the picture
   const PreCalcValues& pcv = *pps.pcv;
   m_ctuLineBottoms.create( pcv.chrFormat, Area( 0, 0, pcv.widthInCtus << pcv.maxCUSizeLog2, pcv.heightInCtus * Picture::CTU_LINE_BOTTOM_ROWS ), 0, Picture::CTU_LINE_BOTTOM_ROWS );
+  // the right columns of one CTU per CTU line and tile column, side by side
+  m_ctuRightColumns.create( pcv.chrFormat, Area( 0, 0, pps.numTileCols * Picture::CTU_RIGHT_COLUMNS, pcv.heightInCtus << pcv.maxCUSizeLog2 ) );
 
   const int sizeInCtus = pps.pcv->sizeInCtus;
   m_processStates = std::vector<ProcessCtuState>( sizeInCtus );
@@ -340,6 +342,7 @@ void EncSlice::initPic( Picture* pic )
   m_picEncState.id         = ++lastPicEncStateId;
   m_picEncState.syncPicCtx = m_syncPicCtx.data();
   pic->m_ctuLineBottoms    = &m_ctuLineBottoms;
+  pic->m_ctuRightColumns   = &m_ctuRightColumns;
 
   for( auto* lnRsc : m_TileLineEncRsrc )
   {
@@ -784,8 +787,10 @@ void EncSlice::finishCompressSlice( Picture* pic, Slice& slice )
 {
   CodingStructure& cs = *pic->cs;
 
-  // every CTU is encoded: nothing reads the line bottoms any more, and this slice encoder will keep the next picture's
-  pic->m_ctuLineBottoms = nullptr;
+  // every CTU is encoded: nothing reads the line bottoms and right columns any more, and this slice encoder will keep the
+  // next picture's
+  pic->m_ctuLineBottoms  = nullptr;
+  pic->m_ctuRightColumns = nullptr;
 
   // finalize
   if( slice.sps->saoEnabled && pic->useSAO )
@@ -1042,6 +1047,11 @@ bool EncSlice::xProcessCtuTask( int threadIdx, void* taskParam )
         {
           pic->keepCtuBottomRows( ctuArea );
         }
+        // and the CTU to the right in the same tile reads these columns unfiltered (Picture::getRecoLeftOfCtu)
+        if( ctuPosX + 1 < pcv.widthInCtus && pps.ctuToTileCol[ctuPosX + 1] == pps.ctuToTileCol[ctuPosX] )
+        {
+          pic->keepCtuRightColumns( ctuArea );
+        }
 
         DTRACE_UPDATE( g_trace_ctx, std::make_pair( "final", 1 ) );
         ITT_TASKEND( itt_domain_encode, itt_handle_ctuEncode );
@@ -1053,10 +1063,11 @@ bool EncSlice::xProcessCtuTask( int threadIdx, void* taskParam )
     // vertical loopfilter
     case LF_VER:
       {
-        // clip check to right tile border (CTU_ENCODE pre-processing delay due to IBC)
+        // clip check to right tile border (CTU_ENCODE pre-processing delay due to IBC). Without IBC no wait for the CTU to
+        // the right: it reads the unfiltered columns left of it from the kept CTU columns (keepCtuRightColumns).
         const int tileCol = slice.pps->ctuToTileCol[ctuPosX];
         const int lastCtuPosXInTile = slice.pps->tileColBd[tileCol] + slice.pps->tileColWidth[tileCol] - 1;
-        const int checkRight = std::min<int>( encSlice->m_ctuEncDelay, lastCtuPosXInTile - ctuPosX );
+        const int checkRight = pic->useIBC ? std::min<int>( encSlice->m_ctuEncDelay, lastCtuPosXInTile - ctuPosX ) : 0;
 
         const bool hasTiles = encSlice->m_pcEncCfg->m_tileParallelCtuEnc && slice.pps->getNumTiles() > 1;
 
@@ -1071,7 +1082,7 @@ bool EncSlice::xProcessCtuTask( int threadIdx, void* taskParam )
           }
         }
         
-        // ensure all surrounding ctu's are encoded (intra pred requires non-reshaped and unfiltered residual, IBC requires unfiltered samples too)
+        // with IBC, ensure the surrounding ctu's are encoded (IBC requires unfiltered samples)
         // check right with max offset (due to WPP condition above, this implies top-right has been already encoded)
         for( int i = hasTiles ? -!!ctuPosX : checkRight; i <= checkRight; i++ )
           if( pps.canFilterCtuBdry( ctuPosX, ctuPosY, i, 0 ) && processStates[ctuRsAddr + i] <= CTU_ENCODE )

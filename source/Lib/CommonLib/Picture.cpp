@@ -546,6 +546,43 @@ void Picture::keepCtuBottomRows( const UnitArea& ctuArea )
   }
 }
 
+// m_ctuRightColumns keeps the right columns of the CTUs of tile column t at its columns t * cols .. ( t + 1 ) * cols - 1, in
+// the rows of the picture: a CTU line encodes the CTUs of one tile one after another, so each CTU's columns stay there until
+// the CTU to its right, their only reader, is encoded. The column of picture column x:
+static int ctuRightColumnsCol( const int x, const int ctuWidth, const int cols, const PPS& pps )
+{
+  const int ctuX = x / ctuWidth;
+  CHECKD( x < ( ctuX + 1 ) * ctuWidth - cols, "column not kept: left of the right columns of its CTU" );
+  return pps.ctuToTileCol[ctuX] * cols + x - ( ( ctuX + 1 ) * ctuWidth - cols );
+}
+
+const CPelBuf Picture::getRecoLeftOfCtu( const CompArea& blk ) const
+{
+  if( !m_ctuRightColumns )
+  {
+    return getRecoBuf( blk );
+  }
+  const int scaleX   = getComponentScaleX( blk.compID, chromaFormat );
+  const int ctuWidth = cs->pcv->maxCUSize >> scaleX;
+  const int cols     = CTU_RIGHT_COLUMNS >> scaleX;
+  CHECKD( blk.x / ctuWidth != ( blk.x + (int)blk.width - 1 ) / ctuWidth, "columns of two CTUs" );
+  return m_ctuRightColumns->get( blk.compID ).subBuf( ctuRightColumnsCol( blk.x, ctuWidth, cols, *cs->pps ), blk.y, blk.width, blk.height );
+}
+
+void Picture::keepCtuRightColumns( const UnitArea& ctuArea )
+{
+  for( uint32_t c = 0; c < getNumberValidComponents( chromaFormat ); c++ )
+  {
+    const CompArea& ctu = ctuArea.blocks[c];
+    const int scaleX    = getComponentScaleX( ctu.compID, chromaFormat );
+    const int ctuWidth  = cs->pcv->maxCUSize >> scaleX;
+    const int cols      = CTU_RIGHT_COLUMNS >> scaleX;
+    const int x         = ctu.x + ctu.width - cols;
+    const CompArea right( ctu.compID, chromaFormat, Area( x, ctu.y, cols, ctu.height ) );
+    m_ctuRightColumns->get( ctu.compID ).subBuf( ctuRightColumnsCol( x, ctuWidth, cols, *cs->pps ), ctu.y, cols, ctu.height ).copyFrom( getRecoBuf( right ) );
+  }
+}
+
 PelUnitBuf Picture::getPicBuf( const UnitArea& unit, const PictureType type )
 {
   if( chromaFormat == CHROMA_400 )

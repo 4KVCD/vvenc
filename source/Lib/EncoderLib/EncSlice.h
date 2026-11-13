@@ -130,6 +130,7 @@ private:
   std::vector<ProcessCtuState> m_processStates;
   int                          m_ctuEncDelay;
   PelStorage                   m_ctuLineBottoms;                     ///< the encoded picture's unfiltered CTU line bottoms (Picture::m_ctuLineBottoms)
+  PelStorage                   m_ctuRightColumns;                    ///< the encoded picture's unfiltered CTU right columns (Picture::m_ctuRightColumns)
 
   LoopFilter*                  m_pLoopFilter;
   EncAdaptiveLoopFilter*       m_pALF;

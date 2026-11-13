@@ -3705,10 +3705,15 @@ void EncCu::xCalDebCost( CodingStructure &cs, Partitioner &partitioner )
 
   const UnitArea  areaTop  = UnitArea( format, Area( lumaPos.x,             lumaPos.y - verOffset, lumaSize.width, verOffset       ) );
   const UnitArea  areaLeft = UnitArea( format, Area( lumaPos.x - horOffset, lumaPos.y,             horOffset,      lumaSize.height ) );
-  // at a CTU top the area above lies in the CTU line above, which may be deblocked meanwhile: it is read as it was encoded
+  // at a CTU top the area above lies in the CTU line above, at a CTU's left edge the area left of it in the CTU to the left
+  // (of the same tile column: the last CTU of a tile column keeps no columns), which may be deblocked meanwhile: they are read
+  // as they were encoded
   const Picture& pic            = *cs.picture;
+  const int      ctuX           = lumaPos.x >> cs.pcv->maxCUSizeLog2;
   const bool     topInLineAbove = ( lumaPos.y & cs.pcv->maxCUSizeMask ) == 0;
+  const bool     leftInCtuLeft  = ( lumaPos.x & cs.pcv->maxCUSizeMask ) == 0 && ctuX > 0 && cs.pps->ctuToTileCol[ctuX - 1] == cs.pps->ctuToTileCol[ctuX];
   const auto     recoAbove      = [&]( const CompArea& blk ) -> CPelBuf { return topInLineAbove ? pic.getRecoAboveCtuTop( blk ) : pic.getRecoBuf( blk ); };
+  const auto     recoLeft       = [&]( const CompArea& blk ) -> CPelBuf { return leftInCtuLeft  ? pic.getRecoLeftOfCtu( blk )   : pic.getRecoBuf( blk ); };
 
   for ( int compIdx = compStr; compIdx <= compEnd; compIdx++ )
   {
@@ -3730,7 +3735,7 @@ void EncCu::xCalDebCost( CodingStructure &cs, Partitioner &partitioner )
       locArea.x -= cu->blocks[compIdx].x;
       locArea.y -= cu->blocks[compIdx].y;
       PelBuf dbReco = picDbBuf.getBuf( locArea );
-        dbReco.copyFrom( cs.picture->getRecoBuf( compArea ) );
+        dbReco.copyFrom( recoLeft( compArea ) );
       }
     //top neighbour
     if ( topEdgeAvai )
@@ -3788,7 +3793,7 @@ void EncCu::xCalDebCost( CodingStructure &cs, Partitioner &partitioner )
       {
         org = cs.picture->getFiltOrigBuf( compArea );
       }
-      CPelBuf reco   = cs.picture->getRecoBuf( compArea );
+      CPelBuf reco   = recoLeft( compArea );
       CPelBuf recoDb = picDbBuf.getBuf( locArea );
       distBeforeDb  += xGetDistortionDb( cs, org, reco,   compArea, true );
       distAfterDb   += xGetDistortionDb( cs, org, recoDb, compArea, false  );

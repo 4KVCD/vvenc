@@ -83,6 +83,14 @@ private:
   // probe its stack pages (___chkstk_ms on Windows)
   Pel         m_tempArray[MAX_CU_SIZE * MAX_CU_SIZE];
   uint32_t    m_refBufferStride[MAX_NUM_COMP];
+  // xFillReferenceSamples' above row at a CTU's left edge (not its top), with the corner columns of the CTU to the left
+  Pel         m_aboveRowAtCtuLeft[MAX_CU_SIZE * 2 + 1 + MAX_REF_LINE_IDX];
+  // loadLMLumaRecPels' luma at a CTU's left edge, with the left columns of the CTU to the left: the 4:2:0 / 4:2:2 taps reach
+  // 3 columns left, the vertically collocated 4:2:0 ones 3 rows above
+  static constexpr int LM_COPY_COLS_LEFT  = 4;
+  static constexpr int LM_COPY_ROWS_ABOVE = 3;
+  static constexpr int LM_COPY_STRIDE     = LM_COPY_COLS_LEFT + 2 * MAX_TB_SIZEY;
+  Pel         m_lumaAtCtuLeft[LM_COPY_STRIDE * ( LM_COPY_ROWS_ABOVE + 2 * MAX_TB_SIZEY + 1 )];
   int         m_numIntraNeighbor;
   bool        m_neighborFlags[4 * MAX_NUM_PART_IDXS_IN_CTU_WIDTH + 1];
   Area        m_lastArea;

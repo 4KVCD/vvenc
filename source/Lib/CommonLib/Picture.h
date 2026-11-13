@@ -183,6 +183,12 @@ struct Picture : public UnitArea
   const CPelBuf     getRecoAboveCtuTop(const CompArea& blk)         const;
   // Keeps the bottom rows of an encoded CTU for getRecoAboveCtuTop (called before its deblocking may start).
   void              keepCtuBottomRows (const UnitArea& ctuArea);
+  // The columns left of a CTU's left edge as the CTU to the left was encoded, before its loop filters. The same readers use
+  // it, so a CTU is deblocked without waiting for the encoding of the CTU to its right. blk lies in the right
+  // CTU_RIGHT_COLUMNS (luma) columns of one CTU.
+  const CPelBuf     getRecoLeftOfCtu  (const CompArea& blk)         const;
+  // Keeps the right columns of an encoded CTU for getRecoLeftOfCtu (called before its deblocking may start).
+  void              keepCtuRightColumns(const UnitArea& ctuArea);
 
         PelStorage& getFilteredOrigBuffer()                               { return *m_sharedBufs[       PIC_FILT_ORIGINAL]; }
          PelUnitBuf getFiltOrigBuf()                                      { return getSharedBuf(        PIC_FILT_ORIGINAL); }
@@ -301,6 +307,12 @@ public:
   PelStorage*                   m_ctuLineBottoms = nullptr;
   // the deepest of those readers, EDO, looks 8 luma rows above a CU
   static constexpr int          CTU_LINE_BOTTOM_ROWS = 8;
+  // While the picture is encoded: the right CTU_RIGHT_COLUMNS luma columns (and the chroma columns beside them) of the last
+  // encoded CTU of every CTU line in every tile column, unfiltered, owned by the slice encoder. Null otherwise;
+  // getRecoLeftOfCtu then reads the reconstruction.
+  PelStorage*                   m_ctuRightColumns = nullptr;
+  // EDO looks 8 luma columns left of a CU too
+  static constexpr int          CTU_RIGHT_COLUMNS = 8;
 
   void*                         userData;
 
