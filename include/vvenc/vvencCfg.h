@@ -411,7 +411,8 @@ typedef struct vvencMCTF
   int                 MCTFSpeed;
   bool                MCTFFutureReference;
   int                 MCTFUnitSize;
-  int                 mctfUnused;                                                        // TODO: remove unused memory from configuration
+  int                 MCTFLevelTilt;                                                     // MCTF filter strength raised for the three upper temporal levels
+                                                                                         // (0: off, 1: on, default; random access only; also raises explicit MCTFStrength values)
 
   int                 numFrames;
   int                 MCTFFrames[VVENC_MAX_MCTF_FRAMES];
@@ -800,7 +801,11 @@ typedef struct vvenc_config
 #define VVENC_SET_FGA_STRENGTH(s) ((uint8_t)((s)*64+0.5))
   uint8_t             m_fgaStrengthVal;                                                  // Film grain strength as the fraction of the analysed strength, as a fixed point value with 6 fractional bits (default 1.0, 0 disables the grain)
   int8_t              m_adaptiveIntra;                                                   // adaptive intra refresh (0: off, 1: I pictures where they pay at scene cuts and in the slice type adaptation, 2: the cost test for the slice type adaptation only)
-  int8_t              m_reservedInt8_2[1];
+#define VVENC_SET_CUTREE_PIC_STRENGTH(s) ((uint8_t)((s)*32+0.5))
+  uint8_t             m_cuTreePicStrength;                                               // CU-tree (BIM 1), random access, constant QP: picture QPs from the CU tree's dependency estimate
+                                                                                         // in place of the temporal layers' QP offsets, scaled by this 5-bit fixed point value (default 0: off),
+                                                                                         // e.g. VVENC_SET_CUTREE_PIC_STRENGTH(2.0); the encoder then codes at QP + round( 3 + 2 * strength ),
+                                                                                         // to offset the lower QPs of the referenced pictures (calibrated at strength 2, GOP 32)
   int32_t             m_reservedInt32;
   double              m_reservedDouble[7];
 
