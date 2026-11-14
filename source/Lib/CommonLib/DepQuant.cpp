@@ -758,17 +758,6 @@ namespace DQIntern
     m_DistOrgFact               = (int64_t)( nomDistFactor * double(int64_t(1)<<(m_DistShift+1       )) + .5 );
   }
 
-  // The coefficient rows dequantBlock and DepQuant::xQuantDQ clear. A block of 64 rows has coefficients only in its first
-  // 32 (JVET-C0024 zero-out), and nothing reads the rows past them. For the dequantized buffer: neither the inverse
-  // transform (TrQuant::xIT) nor the encoder's next forward transform and quantization of the buffer. For the quantized
-  // levels: the dequantization and the residual coding read only scan positions, which lie in the first 32 rows. The LFNST
-  // cut (xIT reads 4 or 8 rows) can't be used the same way: the encoder reuses the dequantized buffer in its next forward
-  // LFNST pass, and the streams change without the full clear there.
-  static int rowsToClear( const int height )
-  {
-    return std::min( height, JVET_C0024_ZERO_OUT_TH );
-  }
-
   void Quantizer::initQuantBlock( const TransformUnit& tu, const ComponentID compID, const QpParam& cQP, const double lambda, QuantBlockMemo& memo )
   {
     CHECKD( tu.mtsIdx[compID] == MTS_SKIP, "the memo does not cover transform skip" );
