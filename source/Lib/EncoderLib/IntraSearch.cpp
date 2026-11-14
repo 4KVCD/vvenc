@@ -157,6 +157,24 @@ void IntraSearch::setCtuEncRsrc( CABACWriter* cabacEstimator, CtxCache *ctxCache
 //////////////////////////////////////////////////////////////////////////
 static constexpr double COST_UNKNOWN = -65536.0;
 
+// psy-rd's credit of an angular intra candidate's energy in grain (see touchesPsyEdge); with 0.5 --Tune grain drew fewer
+// brush strokes on all four grainy test films at equal size, keeping more grain energy
+static constexpr double PSY_ANGULAR_GRAIN_CREDIT = 0.5;
+
+// true when a 4-sample grid position inside the luma area is gated as near a source edge (Picture::psyEdgeGate); grid
+// positions of the coded area beyond the source picture are not in the gate
+static bool touchesPsyEdge( const Picture& pic, const CompArea& area )
+{
+  const int gridH = pic.psyGridW > 0 ? int( pic.psyEdgeGate.size() ) / pic.psyGridW : 0;
+  for( int y = area.y; y < area.y + int( area.height ) && ( y >> 2 ) < gridH; y += 4 )
+    for( int x = area.x; x < area.x + int( area.width ) && ( x >> 2 ) < pic.psyGridW; x += 4 )
+      if( pic.psyEdgeGate[size_t( y >> 2 ) * pic.psyGridW + ( x >> 2 )] )
+      {
+        return true;
+      }
+  return false;
+}
+
 double IntraSearch::xFindInterCUCost( CodingUnit &cu )
 {
   if( CU::isConsIntra(cu) && !cu.slice->isIntra() )
@@ -718,11 +736,18 @@ bool IntraSearch::xEstIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, 
       CHECK(cu.ispMode && cu.mipFlag, "Error: combination of ISP and MIP not supported");
       CHECK(cu.ispMode && cu.multiRefIdx, "Error: combination of ISP and MRL not supported");
 
+      // psy-rd: an angular candidate (regular, ISP or BDPCM; not planar, DC or MIP) in a CU without a source edge gets only
+      // part of its reconstruction's energy credited, so a directional streak no longer earns the grain's reward
+      const bool angularInGrain = m_pcRdCost->usePsy() && !cu.mipFlag && cu.intraDir[CH_L] > DC_IDX
+                                  && !touchesPsyEdge( *cs.picture, cu.blocks[COMP_Y] );
+      m_pcRdCost->setPsyRecCredit( angularInGrain ? PSY_ANGULAR_GRAIN_CREDIT : 1.0 );
+
       // determine residual for partition
       cs.initSubStructure(*csTemp, partitioner.chType, cs.area, true);
       int doISP = (((cu.ispMode == 0) && noLFNST) || (useISPlfnst && mode && cu.ispMode && (bestLfnstIdx == 0)) || disableLFNST) ? -mode : mode;
       // the contexts are ctxStart's on entry (the reset below follows every call)
       xIntraCodingLumaQT(*csTemp, partitioner, m_SortedPelUnitBufs->getBufFromSortedList(mode), bestCost, doISP, disableMTS, ctxStart);
+      m_pcRdCost->setPsyRecCredit( 1.0 );
 
       DTRACE(g_trace_ctx, D_INTRA_COST, "IntraCost T [x=%d,y=%d,w=%d,h=%d] %f (%d,%d,%d,%d,%d,%d) \n", cu.blocks[0].x,
         cu.blocks[0].y, width, height, csTemp->cost, testMode.modeId, testMode.ispMod,
@@ -1584,6 +1609,10 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID compI
 
   //===== update distortion =====
   ruiDist += m_pcRdCost->getDistPart( piOrg, piReco, bitDepth, compID, DF_SSE );
+  if( m_pcRdCost->usePsy() && compID == COMP_Y )   // every intra decision (mode RD, MTS, LFNST, ISP) reads this distortion
+  {
+    ruiDist += m_pcRdCost->getPsyDistortion( *cs.picture, area, piReco, bitDepth );
+  }
   if( jointCbCr )
   {
     CPelBuf         crOrg  = cs.getOrgBuf  ( COMP_Cr );

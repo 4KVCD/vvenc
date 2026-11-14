@@ -3388,6 +3388,150 @@ static void bvBitsLine_SIMD( const Mv* predictors, const int x0, const int xStep
   bvBitsLine<BvOps128>( predictors, x0, xStep, count, y, useIMV, bits );
 }
 
+#ifdef USE_AVX2
+// psy-rd: the L1 norm of an 8x8 block's unnormalized Walsh-Hadamard transform over the fine band PSY_BAND_8x8 (RdCost.h).
+// One register per row of 8 int32 (10-bit samples give coefficients up to 64 * 1023, too large for int16). Butterflies
+// between the 8 registers transform along the columns (register = vertical frequency v, lane = column); after a
+// transpose the same butterflies transform along the rows, so register u, lane v holds coefficient (u, v) in the
+// natural order of the C version. The band is symmetric in u and v, so its mask row u is register u's lane mask.
+static inline void hadamardButterflies8x8_AVX2( __m256i r[8] )
+{
+  for( int len = 1; len < 8; len <<= 1 )
+    for( int y = 0; y < 8; y += 2 * len )
+      for( int k = y; k < y + len; k++ )
+      {
+        const __m256i a = r[k], b = r[k + len];
+        r[k]       = _mm256_add_epi32( a, b );
+        r[k + len] = _mm256_sub_epi32( a, b );
+      }
+}
+
+static inline void transpose8x8Epi32_AVX2( __m256i r[8] )
+{
+  __m256i t[8], u[8];
+  for( int i = 0; i < 8; i += 2 )   // 2x2 blocks of 32-bit elements
+  {
+    t[i]     = _mm256_unpacklo_epi32( r[i], r[i + 1] );
+    t[i + 1] = _mm256_unpackhi_epi32( r[i], r[i + 1] );
+  }
+  for( int i = 0; i < 8; i += 4 )   // 4x4 blocks within each 128-bit lane
+  {
+    u[i]     = _mm256_unpacklo_epi64( t[i],     t[i + 2] );
+    u[i + 1] = _mm256_unpackhi_epi64( t[i],     t[i + 2] );
+    u[i + 2] = _mm256_unpacklo_epi64( t[i + 1], t[i + 3] );
+    u[i + 3] = _mm256_unpackhi_epi64( t[i + 1], t[i + 3] );
+  }
+  for( int i = 0; i < 4; i++ )      // 8x8: the 128-bit lanes of rows i and i + 4
+  {
+    r[i]     = _mm256_permute2x128_si256( u[i], u[i + 4], 0x20 );
+    r[i + 4] = _mm256_permute2x128_si256( u[i], u[i + 4], 0x31 );
+  }
+}
+
+// the fine-band sum of the 8x8 block whose rows (8 int32 each) are r
+static inline int64_t psyBandRows8x8_AVX2( __m256i r[8] )
+{
+  hadamardButterflies8x8_AVX2( r );
+  transpose8x8Epi32_AVX2( r );
+  hadamardButterflies8x8_AVX2( r );
+  // 64 coefficients of at most 64 x 2^15 = 2^21 each (int16 inputs): the int32 sums cannot overflow
+  __m256i acc = _mm256_setzero_si256();
+  for( int u = 0; u < 8; u++ )
+  {
+    const __m256i keep = _mm256_load_si256( ( const __m256i* ) ( PSY_BAND_8x8.keep + 8 * u ) );
+    acc = _mm256_add_epi32( acc, _mm256_and_si256( _mm256_abs_epi32( r[u] ), keep ) );
+  }
+  __m128i sum = _mm_add_epi32( _mm256_castsi256_si128( acc ), _mm256_extracti128_si256( acc, 1 ) );
+  sum = _mm_add_epi32( sum, _mm_shuffle_epi32( sum, 0x4e ) );
+  sum = _mm_add_epi32( sum, _mm_shuffle_epi32( sum, 0xb1 ) );
+  return _mm_cvtsi128_si32( sum );
+}
+
+static int64_t psyBand8x8_AVX2( const Pel* src, ptrdiff_t stride )
+{
+  __m256i r[8];
+  for( int y = 0; y < 8; y++ )
+  {
+    r[y] = _mm256_cvtepi16_epi32( _mm_loadu_si128( ( const __m128i* ) ( src + y * stride ) ) );
+  }
+  return psyBandRows8x8_AVX2( r );
+}
+
+// of a + b: the rows are added in int16 before widening, so a sum outside int16 wraps exactly as the C version's Pel sum
+static int64_t psyBand8x8Sum_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride )
+{
+  __m256i r[8];
+  for( int y = 0; y < 8; y++ )
+  {
+    const __m128i rowA = _mm_loadu_si128( ( const __m128i* ) ( a + y * aStride ) );
+    const __m128i rowB = _mm_loadu_si128( ( const __m128i* ) ( b + y * bStride ) );
+    r[y] = _mm256_cvtepi16_epi32( _mm_add_epi16( rowA, rowB ) );
+  }
+  return psyBandRows8x8_AVX2( r );
+}
+
+// the two butterfly stages of a 4-point transform in each 4 x int32 group: (x0 + x1, x0 - x1, x2 + x3, x2 - x3), then the
+// same between the pairs: lane u of each group holds coefficient u in the natural order of the C version.
+static inline __m256i hadamardRows4_AVX2( __m256i x )
+{
+  __m256i sw = _mm256_shuffle_epi32( x, 0xb1 );   // x1 x0 x3 x2
+  x  = _mm256_blend_epi32( _mm256_add_epi32( x, sw ), _mm256_sub_epi32( sw, x ), 0xaa );
+  sw = _mm256_shuffle_epi32( x, 0x4e );           // x2 x3 x0 x1
+  return _mm256_blend_epi32( _mm256_add_epi32( x, sw ), _mm256_sub_epi32( sw, x ), 0xcc );
+}
+
+// the fine-band (PSY_BAND_4x4) sum of the 4x4 block whose rows 0 / 1 are in the 128-bit lanes of r01 and rows 2 / 3 in
+// those of r23 (int32)
+static inline int64_t psyBandRows4x4_AVX2( const __m256i r01, const __m256i r23 )
+{
+  // along the columns: rows 0 +- 2 and 1 +- 3, then the lanes regrouped so that ( 0 + 2 ) +- ( 1 + 3 ) and
+  // ( 0 - 2 ) +- ( 1 - 3 ) are one add and one sub
+  const __m256i s  = _mm256_add_epi32( r01, r23 );                // row 0 + 2 | row 1 + 3
+  const __m256i d  = _mm256_sub_epi32( r01, r23 );                // row 0 - 2 | row 1 - 3
+  const __m256i lo = _mm256_permute2x128_si256( s, d, 0x20 );     // row 0 + 2 | row 0 - 2
+  const __m256i hi = _mm256_permute2x128_si256( s, d, 0x31 );     // row 1 + 3 | row 1 - 3
+  // along the rows: c0 holds the vertical frequencies v = 0 | 2 in its 128-bit halves, c1 v = 1 | 3
+  const __m256i c0 = hadamardRows4_AVX2( _mm256_add_epi32( lo, hi ) );
+  const __m256i c1 = hadamardRows4_AVX2( _mm256_sub_epi32( lo, hi ) );
+  const int32_t* keep  = PSY_BAND_4x4.keep;   // row v at keep + 4 * v
+  const __m256i  keep0 = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_load_si128( ( const __m128i* ) keep ) ), _mm_load_si128( ( const __m128i* ) ( keep + 8 ) ), 1 );
+  const __m256i  keep1 = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_load_si128( ( const __m128i* ) ( keep + 4 ) ) ), _mm_load_si128( ( const __m128i* ) ( keep + 12 ) ), 1 );
+  const __m256i  acc   = _mm256_add_epi32( _mm256_and_si256( _mm256_abs_epi32( c0 ), keep0 ),
+                                           _mm256_and_si256( _mm256_abs_epi32( c1 ), keep1 ) );   // 16 x at most 16 x 2^15: no overflow
+  __m128i sum = _mm_add_epi32( _mm256_castsi256_si128( acc ), _mm256_extracti128_si256( acc, 1 ) );
+  sum = _mm_add_epi32( sum, _mm_shuffle_epi32( sum, 0x4e ) );
+  sum = _mm_add_epi32( sum, _mm_shuffle_epi32( sum, 0xb1 ) );
+  return _mm_cvtsi128_si32( sum );
+}
+
+// two rows of 4 int16 (8 bytes each) as one register of 8 int32, a row per 128-bit lane
+static inline __m256i loadRows4x2_AVX2( const Pel* src, ptrdiff_t stride )
+{
+  const __m128i rows = _mm_unpacklo_epi64( _mm_loadl_epi64( ( const __m128i* ) src ), _mm_loadl_epi64( ( const __m128i* ) ( src + stride ) ) );
+  return _mm256_cvtepi16_epi32( rows );
+}
+
+static int64_t psyBand4x4_AVX2( const Pel* src, ptrdiff_t stride )
+{
+  return psyBandRows4x4_AVX2( loadRows4x2_AVX2( src, stride ), loadRows4x2_AVX2( src + 2 * stride, stride ) );
+}
+
+// of a + b, added in int16 before widening like the 8x8 version, so it wraps as the C version's Pel sum
+static int64_t psyBand4x4Sum_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride )
+{
+  __m256i r[2];
+  for( int i = 0; i < 2; i++ )
+  {
+    const Pel*    rowA  = a + 2 * i * aStride;
+    const Pel*    rowB  = b + 2 * i * bStride;
+    const __m128i rowsA = _mm_unpacklo_epi64( _mm_loadl_epi64( ( const __m128i* ) rowA ), _mm_loadl_epi64( ( const __m128i* ) ( rowA + aStride ) ) );
+    const __m128i rowsB = _mm_unpacklo_epi64( _mm_loadl_epi64( ( const __m128i* ) rowB ), _mm_loadl_epi64( ( const __m128i* ) ( rowB + bStride ) ) );
+    r[i] = _mm256_cvtepi16_epi32( _mm_add_epi16( rowsA, rowsB ) );
+  }
+  return psyBandRows4x4_AVX2( r[0], r[1] );
+}
+#endif
+
 template <X86_VEXT vext>
 void RdCost::_initRdCostX86()
 {
@@ -3447,6 +3591,10 @@ void RdCost::_initRdCostX86()
     m_afpSadFourPositions[5] = xGetFourSads_AVX2<32>;
     m_afpSadFourPositions[6] = xGetFourSads_AVX2<64>;
     m_afpSadFourPositions[7] = xGetFourSads_AVX2<128>;
+    m_psyBand8x8             = psyBand8x8_AVX2;
+    m_psyBand8x8Sum          = psyBand8x8Sum_AVX2;
+    m_psyBand4x4             = psyBand4x4_AVX2;
+    m_psyBand4x4Sum          = psyBand4x4Sum_AVX2;
   }
 #endif
 }

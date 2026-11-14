@@ -148,6 +148,14 @@ struct LostGrainSpectrum
 
 struct Picture : public UnitArea
 {
+  // psy-rd: the source's luma texture energies of the 8x8 [0] and 4x4 [1] blocks at every 4-sample grid position
+  // (psyGridW per row), built by RdCost::buildPsyOrgEnergies before the picture's CTUs are coded; empty when psy is off
+  std::vector<int32_t> psyOrgEnergy[2];
+  int                  psyGridW = 0;
+  // psy-rd: 1 at a 4-sample grid position (psyGridW per row) whose 16x16 tile lies within 16 samples of a source edge
+  // (RdCost::buildPsyEdgeGate); empty when psy is off
+  std::vector<uint8_t> psyEdgeGate;
+
   uint32_t margin;
   Picture();
 
@@ -280,6 +288,7 @@ public:
   int                           picInitialQP;
   double                        picInitialLambda;
   double                        picQPFraction; // fractional part of the picture QP with a fractional --qp, applied by QPA
+  double                        lambdaQP;      // the QP the slice lambda belongs to (fractional with a fractional --qp, QPA off)
   int16_t                       picMemorySTA;
   PicVisAct                     picVA;
   std::vector<LostGrainSpectrum> lostGrainSpectra[ MAX_NUM_COMP ];   // ascending mean8; from the picture's end to its SEI

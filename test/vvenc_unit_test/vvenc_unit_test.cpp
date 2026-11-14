@@ -4366,6 +4366,77 @@ static bool check_bvBitsLineIBC( RdCost* ref, RdCost* opt, unsigned num_cases )
   return true;
 }
 
+// psy-rd's n x n Walsh-Hadamard fine-band kernels (n = 8 or 4). Besides random 10-bit samples: the unclipped prediction +
+// residual sums the transform decisions pass (-1023 ... 2046, here the whole signed 12-bit range), any int16 value (the
+// 4x4 kernel gets the int16-wrapped sums of the C path), a flat block (all AC 0), the largest sample everywhere and a
+// 0 / 1023 checkerboard (all energy in one AC coefficient, inside the band).
+static bool check_psyBand( RdCost* ref, RdCost* opt, int n, unsigned num_cases )
+{
+  const std::string name = n == 8 ? "RdCost::m_psyBand8x8" : "RdCost::m_psyBand4x4";
+  printf( "Testing %s\n", name.c_str() );
+  auto kernel = [n]( RdCost* rdCost ) { return n == 8 ? rdCost->m_psyBand8x8 : rdCost->m_psyBand4x4; };
+
+  DimensionGenerator rng;
+  InputGenerator<Pel> g10{ 10, /*is_signed=*/false };
+  InputGenerator<Pel> g12{ 12, /*is_signed=*/true };
+  auto                any16 = []() { return Pel( ( rand() << 8 ) ^ rand() ); };   // any int16 value (RAND_MAX may be only 2^15 - 1)
+
+  bool passed = true;
+  for( unsigned i = 0; i < num_cases + 3; i++ )
+  {
+    const int        stride = rng.get( n, 64 );
+    std::vector<Pel> buf( stride * n );
+    if( i < num_cases )
+    {
+      if( i % 3 == 2 )
+        std::generate( buf.begin(), buf.end(), any16 );
+      else
+        std::generate( buf.begin(), buf.end(), i & 1 ? g12 : g10 );
+    }
+    else
+    {
+      for( int y = 0; y < n; y++ )
+        for( int x = 0; x < stride; x++ )
+          buf[y * stride + x] = i == num_cases ? 512 : i == num_cases + 1 ? 1023 : ( ( x + y ) & 1 ) * 1023;
+    }
+    passed = compare_value( name, kernel( ref )( buf.data(), stride ), kernel( opt )( buf.data(), stride ) ) && passed;
+  }
+  return passed;
+}
+
+// the same kernels of a + b (prediction + residual), the sum taken as Pel: 10-bit predictions with residuals of 11 bits
+// (the usual range) and of 16 bits (sums outside int16 must wrap as the C version's Pel sum does)
+static bool check_psyBandSum( RdCost* ref, RdCost* opt, int n, unsigned num_cases )
+{
+  const std::string name = n == 8 ? "RdCost::m_psyBand8x8Sum" : "RdCost::m_psyBand4x4Sum";
+  printf( "Testing %s\n", name.c_str() );
+  auto kernel = [n]( RdCost* rdCost ) { return n == 8 ? rdCost->m_psyBand8x8Sum : rdCost->m_psyBand4x4Sum; };
+
+  DimensionGenerator rng;
+  InputGenerator<Pel> g10{ 10, /*is_signed=*/false };
+  InputGenerator<Pel> g11{ 11, /*is_signed=*/true };
+  auto                any16 = []() { return Pel( ( rand() << 8 ) ^ rand() ); };
+
+  bool passed = true;
+  for( unsigned i = 0; i < num_cases; i++ )
+  {
+    const int        strideA = rng.get( n, 64 ), strideB = rng.get( n, 64 );
+    std::vector<Pel> a( strideA * n ), b( strideB * n );
+    std::generate( a.begin(), a.end(), g10 );
+    if( i & 1 )
+    {
+      std::generate( b.begin(), b.end(), any16 );
+    }
+    else
+    {
+      std::generate( b.begin(), b.end(), g11 );
+    }
+    passed = compare_value( name, kernel( ref )( a.data(), strideA, b.data(), strideB ),
+                                  kernel( opt )( a.data(), strideA, b.data(), strideB ) ) && passed;
+  }
+  return passed;
+}
+
 static bool test_RdCost()
 {
   RdCost ref;
@@ -4376,6 +4447,11 @@ static bool test_RdCost()
   unsigned num_cases = NUM_CASES;
   bool passed = true;
   passed = check_bvBitsLineIBC( &ref, &opt, 10 * num_cases ) && passed;
+  for( int n : { 8, 4 } )
+  {
+    passed = check_psyBand( &ref, &opt, n, 10 * num_cases ) && passed;
+    passed = check_psyBandSum( &ref, &opt, n, 10 * num_cases ) && passed;
+  }
   std::array<int, 8> widths = { 1, 2, 4, 8, 16, 32, 64, 128 };
   std::array<int, 7> heights = { 2, 4, 8, 16, 32, 64, 128 };
 

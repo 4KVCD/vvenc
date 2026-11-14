@@ -56,6 +56,8 @@ POSSIBILITY OF SUCH DAMAGE.
 //! \{
 
 namespace vvenc {
+
+struct Picture;
   
 #if defined(TARGET_SIMD_X86)  && ENABLE_SIMD_OPT_DIST
 using namespace x86_simd;
@@ -75,6 +77,49 @@ typedef Distortion( *FpDistFunc   )( const DistParam& );
 typedef void      ( *FpDistFuncX5 )( const DistParam&, Distortion*, bool );
 // The SADs of four reference positions. A result above maximumDistortionForEarlyExit may be a partial sum.
 typedef void      ( *FpSadFourPositions )( const DistParam&, const Pel* const*, Distortion* );
+
+// psy-rd measures a block's texture energy on the FINE band of its unnormalized Walsh-Hadamard transform: in an 8x8 block
+// the coefficients (u, v) with seq(u) + seq(v) >= 4, in a 4x4 block >= 2, where seq is the number of sign changes along the
+// transform's row. Grain and fine texture live there. Against psy on every AC coefficient at the same strength (PsyRD 20,
+// preset fast) the band needs 26 to 52 % fewer bytes for the same finest-octave grain energy on film (nocturne_grain,
+// wrath_of_man) and keeps the flat inter QP's steadiness. The higher edge 6 (seq sum >= 6, at PsyRD 12) kept 1.3 to 1.7 dB more
+// luma PSNR at equal size, but it needs 37 % to 3.3x the bytes of psy on every AC coefficient for the same grain energy and
+// pulses with the GOP. The butterflies give the natural (Sylvester) order, not the sequency order: row r's
+// sign at column c is the parity of popcount( r & c ), so rows 0..7 of the 8x8 transform change sign 0, 7, 3, 4, 1, 6, 2, 5
+// times and rows 0..3 of the 4x4 one 0, 3, 1, 2.
+constexpr int hadamardRowSequency( int row, int n )
+{
+  int changes = 0, prevParity = 0;   // column 0 is + in every row
+  for( int col = 1; col < n; col++ )
+  {
+    int parity = 0;
+    for( int bits = row & col; bits; bits &= bits - 1 )   // a loop: MSVC has no constexpr popcount
+    {
+      parity ^= 1;
+    }
+    changes += parity != prevParity;
+    prevParity = parity;
+  }
+  return changes;
+}
+
+// the band as a mask over the transform's coefficients: keep[v * n + u] is -1 (all bits) inside it, 0 outside (DC always)
+struct PsyBandMask
+{
+  alignas( 32 ) int32_t keep[64];
+};
+
+constexpr PsyBandMask psyBandMask( int n, int minSequency )
+{
+  PsyBandMask mask{};
+  for( int v = 0; v < n; v++ )
+    for( int u = 0; u < n; u++ )
+      mask.keep[v * n + u] = hadamardRowSequency( u, n ) + hadamardRowSequency( v, n ) >= minSequency ? -1 : 0;
+  return mask;
+}
+
+static constexpr PsyBandMask PSY_BAND_8x8 = psyBandMask( 8, 4 );
+static constexpr PsyBandMask PSY_BAND_4x4 = psyBandMask( 4, 2 );   // the same frequencies: a 4x4 row spans half the samples
 
 // ====================================================================================================================
 // Class definition
@@ -127,6 +172,13 @@ public:
   Distortion ( *m_fxdWtdPredPtr )( const DistParam& dp, uint32_t fixedWeight );
   // the bits of getBitsMultiplePredsIBC( x0 + i * xStep, y ) for i = 0 ... count - 1, with the given predictors
   void       ( *m_bvBitsLineIBC )( const Mv* predictors, const int x0, const int xStep, const int count, const int y, const bool useIMV, unsigned* bits );
+  // psy-rd: the L1 norm of an 8x8 block's unnormalized Walsh-Hadamard transform over the fine band PSY_BAND_8x8
+  int64_t    ( *m_psyBand8x8 )( const Pel* src, ptrdiff_t stride );
+  // the same of the block a + b, each sample summed as Pel (prediction + residual, unclipped)
+  int64_t    ( *m_psyBand8x8Sum )( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride );
+  // the same two of a 4x4 block, over PSY_BAND_4x4
+  int64_t    ( *m_psyBand4x4 )( const Pel* src, ptrdiff_t stride );
+  int64_t    ( *m_psyBand4x4Sum )( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride );
 
   // for distortion
   FpDistFunc              m_afpDistortFunc[2][DF_TOTAL_FUNCTIONS]; // [eDFunc]
@@ -156,6 +208,8 @@ private:
   Distortion              m_motionCost[MOTION_COST_TABLE_SIZE];
   int                     m_iCostScale;
   double                  m_dCostIBC;
+  double                  m_psyStrength = 0;          // psy-rd strength, 0: off
+  double                  m_psyRecCredit = 1.0;       // share of the reconstruction's energy psy-rd credits
 public:
   RdCost();
   virtual ~RdCost();
@@ -184,6 +238,22 @@ public:
   {
     return ( useUnadjustedLambda ? m_DistScaleUnadjusted : m_DistScale ) * double( distortion ) + double( fracBits );
   }
+
+  // psy-rd (x264's psy_rd): the texture energy of a block is the L1 norm of its AC Walsh-Hadamard coefficients in 8-bit
+  // sample units; the psy distortion of an area is strength * sqrt( lambda ) * the sum over its 8x8 blocks (n x n with n the
+  // area's smaller side when that is under 8: 4x4, or 2x2 / 1x1 for ISP slivers) of | energy( source ) -
+  // energy( reconstruction ) |. Luma only; strength 0 is off.
+  void          setPsyStrength      ( double strength )                 { m_psyStrength = strength; }
+  bool          usePsy              ()                            const { return m_psyStrength > 0; }
+  // the source energies and the source-edge gate (Picture::psyEdgeGate) of a picture, once before its CTUs are coded
+  void          buildPsyOrgEnergies ( Picture& pic, int bitDepth ) const;
+  // only this share of the reconstruction's energy counts against the source's (1: all; IntraSearch's angular modes in grain)
+  void          setPsyRecCredit     ( double credit )                   { m_psyRecCredit = credit; }
+  // of rec, or of rec + resi when resi is given (the transform decisions have the residual but no reconstruction yet)
+  Distortion    getPsyDistortion    ( const Picture& pic, const CompArea& area, const CPelBuf& rec, const CPelBuf& resi, int bitDepth ) const;
+  Distortion    getPsyDistortion    ( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const { return getPsyDistortion( pic, area, rec, CPelBuf(), bitDepth ); }
+  // the sum over the area's whole 8x8 blocks of | E_org - E_rec | (no strength, lambda or credit): SAO weighs its changes
+  int64_t       getPsyEnergyGap     ( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const;
 
   void          setDistParam        ( DistParam &rcDP, const CPelBuf& org, const Pel* piRefY , int iRefStride, int bitDepth, ComponentID compID, int subShiftMode = 0, int useHadamard = 0 );
   DistParam     setDistParam        ( const CPelBuf& org, const CPelBuf& cur, int bitDepth, DFunc dfunc );
@@ -271,6 +341,13 @@ public:
   
   static Distortion xCalcHADs2x2      ( const Pel* piOrg, const Pel* piCur, int iStrideOrg, int iStrideCur );
   static Distortion xGetHAD2SADs      ( const DistParam& pcDtParam );
+  static int64_t    xPsyBandL1        ( const Pel* src, ptrdiff_t stride, int n );
+  static int64_t    xPsyBand8x8       ( const Pel* src, ptrdiff_t stride ) { return xPsyBandL1( src, stride, 8 ); }
+  static int64_t    xPsyBand8x8Sum    ( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride );
+  static int64_t    xPsyBand4x4       ( const Pel* src, ptrdiff_t stride ) { return xPsyBandL1( src, stride, 4 ); }
+  static int64_t    xPsyBand4x4Sum    ( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride );
+  int64_t           xPsyEnergy        ( const Pel* src, ptrdiff_t stride, int n, int shift ) const;
+  int64_t           xPsyOrgEnergy     ( const Picture& pic, const CPelBuf& org, int x, int y, int xInArea, int yInArea, int n, int shift ) const;
   template<bool fastHad>
   static Distortion xGetHADs          ( const DistParam& pcDtParam );
 

@@ -292,6 +292,11 @@ void EncCu::initSlice( const Slice* slice )
 {
   m_cTrQuant.setLambdas( slice->getLambdas() );
   m_cRdCost.setLambda( slice->getLambdas()[0], slice->sps->bitDepths );
+
+  if( m_pcEncCfg->m_psyRdStrengthVal )
+  {
+    m_cRdCost.setPsyStrength( EncSlice::getPsyRdStrength( *m_pcEncCfg, *slice ) );
+  }
 }
 
 void EncCu::setCtuEncRsrc( CABACWriter* cabacEstimator, CtxCache* ctxCache, ReuseUniMv* pReuseUniMv, BlkUniMvInfoBuffer* pBlkUniMvInfoBuffer, AffineProfList* pAffineProfList, IbcBvCand* pCachedBvs )
@@ -359,6 +364,7 @@ void EncCu::init( const VVEncCfg& encCfg, const SPS& sps, std::vector<int>* cons
   m_geoRowPrefix.resize( GEO_PREFIX_LANES * ( GEO_MAX_CU_SIZE + 1 ) * GEO_MAX_CU_SIZE );
   m_cRdCost.create     ();
   m_cRdCost.setCostMode( encCfg.m_costMode );
+  m_cRdCost.setPsyStrength( encCfg.m_psyRdStrength );
   if ( encCfg.m_lumaLevelToDeltaQPEnabled == 1 )
   {
     m_cRdCost.setChromaFormat( encCfg.m_internChromaFormat );
@@ -369,7 +375,9 @@ void EncCu::init( const VVEncCfg& encCfg, const SPS& sps, std::vector<int>* cons
   m_modeCtrl.init     ( encCfg, &m_cRdCost );
   m_cIntraSearch.init ( encCfg, &m_cTrQuant, &m_cRdCost, &m_SortedPelUnitBufs, m_unitCache );
   m_cInterSearch.init ( encCfg, &m_cTrQuant, &m_cRdCost, &m_modeCtrl, m_cIntraSearch.getSaveCSBuf() );
-  m_cTrQuant.init     ( otherTrQuant ? otherTrQuant->getQuant() : nullptr, encCfg.m_RDOQ, encCfg.m_useRDOQTS, false, true, encCfg.m_quantThresholdVal );
+  m_cTrQuant.init     ( otherTrQuant ? otherTrQuant->getQuant() : nullptr, encCfg.m_RDOQ, encCfg.m_useRDOQTS, false, true, encCfg.m_quantThresholdVal, encCfg.m_keepHighBand != 0,
+                        encCfg.m_levelLambdaVal / 64.0 );
+  m_cTrQuant.getQuant()->setPsyRdoqStrength( encCfg.m_psyRdoqStrength );
 
   m_pcRateCtrl = pRateCtrl;
 
@@ -3005,6 +3013,16 @@ double EncCu::calcLumaCost4MergePrediction( const TempCtx &ctxStart, const PelUn
 
   double cost   = ( double ) dist + ( double ) fracBits * lambda;
 
+  // Psy-rd in the candidate ranking: on a grainy source SATD prefers smooth predictions (a bi-predicted average of two references
+  // halves their grain), so the candidates that keep the grain were dropped before the RD check could weigh their psy term. The
+  // prediction's psy distortion (its block energies against the source's, as the skip check measures it) is added here in the
+  // ranking's SAD domain: the RD-domain term (strength x sqrt(lambda) x diff) divided by sqrt(lambda). Cost only: QPA reads dist.
+  if( m_cRdCost.usePsy() )
+  {
+    const Distortion psy = m_cRdCost.getPsyDistortion( *cu.cs->picture, cu.Y(), predBuf.Y(), cu.cs->sps->bitDepths[CH_L] );
+    cost += double( psy ) / m_cRdCost.getMotionLambda();
+  }
+
   m_uiSadBestForQPA = std::min( dist, m_uiSadBestForQPA );
 
   return cost;
@@ -3823,7 +3841,8 @@ void EncCu::xCalDebCost( CodingStructure &cs, Partitioner &partitioner )
   }
 
   //updated cost
-  int64_t distTmp = distCur - cs.dist + distAfterDb - distBeforeDb;
+  // with psy-rd cs.dist also holds the psy distortion, which the deblocking estimate must not subtract
+  int64_t distTmp = ( m_cRdCost.usePsy() ? 0 : distCur - int64_t( cs.dist ) ) + distAfterDb - distBeforeDb;
   cs.costDbOffset = distTmp < 0 ? -m_cRdCost.calcRdCost( 0, -distTmp ) : m_cRdCost.calcRdCost( 0, distTmp );
 }
 

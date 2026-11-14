@@ -252,6 +252,8 @@ void EncSlice::init( const VVEncCfg& encCfg,
                      WaitCounter* ctuTasksDoneCounter )
 {
   m_pcEncCfg            = &encCfg;
+  m_psyRdCost.create();
+  m_psyRdCost.setPsyStrength( encCfg.m_psyRdStrength );
   m_pLoopFilter         = &loopFilter;
   m_pALF                = &alf;
   m_pcRateCtrl          = &rateCtrl;
@@ -271,7 +273,7 @@ void EncSlice::init( const VVEncCfg& encCfg,
     lnRsc = new TileLineEncRsrc( encCfg );
     if( sps.saoEnabled )
     {
-      lnRsc->m_encSao.init( encCfg );
+      lnRsc->m_encSao.init( encCfg, &m_psyRdCost );
     }
   }
 
@@ -367,23 +369,24 @@ void EncSlice::xInitSliceLambdaQP( Slice* slice )
   int  iQP = Clip3 (-slice->sps->qpBDOffset[CH_L], MAX_QP, slice->pic->picInitialQP); // RC start QP
   double dQP     = (rcp ? (double) slice->pic->picInitialQP : xGetQPForPicture (slice));
 
-  // A fractional QP gives a fractional picture QP. Its integer part sets the slice QP and lambda as for an integer QP,
-  // and its fraction raises some blocks or pictures by one QP: with QPA, the CTUs whose activity-based QP lies closest
-  // to the next integer, see BitAllocation::applyQPAdaptationSlice; without QPA, a share of the pictures equal to the
-  // fraction. Each block keeps the lambda of its integer QP, so the RD trade-off stays consistent.
-  slice->pic->picQPFraction = dQP - floor (dQP);
-  dQP -= slice->pic->picQPFraction;
-  if (!m_pcEncCfg->m_usePerceptQPA)
+  // A fractional QP gives a fractional picture QP. With QPA, its integer part sets the slice QP and lambda as for an
+  // integer QP, and its fraction raises the CTUs whose activity-based QP lies closest to the next integer, see
+  // BitAllocation::applyQPAdaptationSlice. Without QPA, every picture keeps the fraction, as in HM: the lambda comes from
+  // the fractional QP and the slice QP is that QP rounded (xCalculateLambda). Raising a share of the pictures by one
+  // whole QP instead made fine texture pop in and out from picture to picture where one QP decides whether it is coded
+  // (nocturne_grain, --tune grain: B pictures at slice QP 33 cost 2.2x those at 34), and the rate non-monotone in --qp.
+  if (m_pcEncCfg->m_usePerceptQPA)
   {
-    // The thresholds come from the low-discrepancy sequence frac(POC * (sqrt(2) - 1)), whose values stay evenly
-    // spread also for the power-of-two POC spacing of one temporal layer, so every layer gets its share of raised QPs.
-    const double ditherPos = slice->poc * 0.41421356237309515;
-
-    if (slice->pic->picQPFraction > ditherPos - floor (ditherPos)) dQP += 1.0;
+    slice->pic->picQPFraction = dQP - floor (dQP);
+    dQP -= slice->pic->picQPFraction;
+  }
+  else
+  {
     slice->pic->picQPFraction = 0.0;
   }
 
   double dLambda = (rcp ? slice->pic->picInitialLambda : xCalculateLambda (slice, slice->TLayer, dQP, dQP, iQP));
+  slice->pic->lambdaQP = dQP;
   int sliceChromaQpOffsetIntraOrPeriodic[2] = { m_pcEncCfg->m_sliceChromaQpOffsetIntraOrPeriodic[0], m_pcEncCfg->m_sliceChromaQpOffsetIntraOrPeriodic[1] };
   const int lookAheadRCCQpOffset = 0;   // was (m_pcEncCfg->m_RCTargetBitrate > 0 && m_pcEncCfg->m_LookAhead && CS::isDualITree (*slice->pic->cs) ? 1 : 0);
   int cbQP = 0, crQP = 0, cbCrQP = 0;
@@ -403,6 +406,7 @@ void EncSlice::xInitSliceLambdaQP( Slice* slice )
       dLambda *= pow (2.0, ((double) iQP - dQP) / 3.0); // adjust lambda based on change of slice QP
     }
     else iQP = (int) dQP; // revert to unadapted slice QP
+    slice->pic->lambdaQP = iQP;
   }
   else if (rcp)
   {
@@ -471,14 +475,38 @@ void EncSlice::xInitSliceLambdaQP( Slice* slice )
 static constexpr int MAX_DEF_TL_QP_OFFSET = 5; // deeper temporal layers (GOP 64) use the last offset
 static constexpr int highTL[MAX_DEF_TL_QP_OFFSET + 1] = { -1, 0, 0, 2, 4, 5 };
 
+// FlatInterQP: every inter picture is coded kFlatQpOffset above the base QP, all at one QP, and the I picture at that QP plus
+// IntraQPOffset. A QP cascade codes fine texture and film grain in its low-QP key pictures and copies it, coarsened, into the
+// higher-QP temporal layers, so the detail visibly pops in and out with the GOP period (nocturne_grain at 10 Mbps: luma
+// PSNR of the key pictures 3.9 dB above the deepest layer's with the cascade, 0.9 dB with one inter QP, which also scored
+// higher VMAF, PSNR and CVVDP at equal size). So FlatInterQP keeps one inter QP at every rate. At equal size the flat QP
+// sits 3.3 to 5.9 above the cascade's base QP on the clips measured (preset fast), so the offset keeps the rate a given QP
+// spends about where the cascade has it. The unreferenced deepest layer stays at that QP too: coding it 1 QP coarser (as
+// x264's --pbratio does) kept more grain energy, but its pictures' PSNR then dips 0.2 to 0.9 dB below their neighbours'
+// every other picture (crowd_run: mean picture-to-picture PSNR step 0.06 -> 0.25), a visible pulse.
+static constexpr int kFlatQpOffset = 5;
+
 // The picture QP before block QP offsets: the base QP plus the offset of the picture's temporal layer.
 int EncSlice::getCascadeQP( const VVEncCfg& encCfg, const GOPEntry& gopEntry, const bool isIntra, int qp, const int lumaQpBDOffset )
 {
+  const bool flatQP = encCfg.m_flatInterQP;
+
   if (encCfg.m_usePerceptQPA)
   {
     const int tlayer = gopEntry.m_vtl;
 
     qp = (isIntra ? std::min (qp, ((qp - std::min (3, floorLog2 (encCfg.m_GOPSize) - 4/*TODO 3 with JVET-AC0149?*/)) * 15 + 3) >> 4) : highTL[std::min (tlayer, MAX_DEF_TL_QP_OFFSET)] + ((qp * (16 + std::min (2, tlayer))) >> 4) + 0/*TODO +-1?*/);
+  }
+  else if( flatQP )
+  {
+    if( qp != -lumaQpBDOffset )
+    {
+      qp += kFlatQpOffset;
+    }
+    if( isIntra )
+    {
+      qp += encCfg.m_intraQPOffset;
+    }
   }
   else if( isIntra )
   {
@@ -498,6 +526,37 @@ int EncSlice::getCascadeQP( const VVEncCfg& encCfg, const GOPEntry& gopEntry, co
     }
   }
   return qp;
+}
+
+// The QP of the GOP's least offset inter pictures before adaptive offsets: the base QP, or kFlatQpOffset above it where
+// FlatInterQP codes every inter picture at one QP (approximate with QPA, whose layer scaling has no single lowest QP).
+int EncSlice::getLowestInterQP( const VVEncCfg& encCfg, const int baseQP )
+{
+  const bool flatQP = encCfg.m_flatInterQP && !encCfg.m_usePerceptQPA;
+  return flatQP ? baseQP + kFlatQpOffset : baseQP;
+}
+
+// The psy-rd strength of a slice. The psy-rd cost is strength x sqrt(lambda) x |energy change| (as x265), so on a picture
+// coded dQP above the GOP's lowest inter QP lambda grows 2^(dQP/3) but the psy term only 2^(dQP/6): psy would weigh
+// 2^(-dQP/6) less against the rate there, and the deep temporal layers would lose the grain energy the shallow ones keep.
+// Scaling the strength by 2^(dQP/6) keeps psy's weight against the rate equal across the GOP. I pictures keep the base
+// strength. dQP compares the QPs the lambdas belong to, both with the fraction of a fractional --qp, so the scaling moves
+// smoothly with --qp (from the rounded slice QP and the integer base QP it jumped about 12 % at each integer).
+// With rate control, whose picture QPs move with the rate, dQP is the picture's offset in the GOP's QP structure (the QP
+// cascade, or 0 for every inter picture with FlatInterQP) at the rate control's base QP, as at constant QP: the strength
+// then follows the structure the first pass coded with, not rate control's corrections.
+double EncSlice::getPsyRdStrength( const VVEncCfg& encCfg, const Slice& slice )
+{
+  double dQp = 0.0;
+  if( ! slice.isIntra() )
+  {
+    const double pictureQp = encCfg.m_RCTargetBitrate > 0
+                               ? getCascadeQP( encCfg, *slice.pic->gopEntry, false, encCfg.m_QP, slice.sps->qpBDOffset[ CH_L ] )
+                               : slice.pic->lambdaQP;
+    const double lowestInterQp = getLowestInterQP( encCfg, encCfg.m_QP ) + encCfg.m_QPFraction;
+    dQp = std::max( 0.0, pictureQp - lowestInterQp );
+  }
+  return encCfg.m_psyRdStrength * pow( 2.0, dQp / 6.0 );
 }
 
 double EncSlice::xGetQPForPicture( const Slice* slice )
@@ -528,8 +587,10 @@ int EncSlice::xGetQPForPicture( const Slice* slice, const int baseQP )
   else
   {
     const bool hasBlockOffsets = m_pcEncCfg->hasBlockQpOffsets() && !slice->pic->m_picShared->m_ctuBimQpOffset.empty();
-    // with CuTreePicStrength the CU tree's picture offset (m_picAuxQpOffset) takes the place of the QP cascade
-    qp = m_pcEncCfg->m_cuTreePicScale > 0.0 && hasBlockOffsets
+    // with CuTreePicStrength the CU tree's picture offset (m_picAuxQpOffset) takes the place of the QP cascade; with
+    // FlatInterQP it lowers the flat levels instead
+    const bool picQpFromCuTree = m_pcEncCfg->m_cuTreePicScale > 0.0 && hasBlockOffsets && ! m_pcEncCfg->m_flatInterQP;
+    qp = picQpFromCuTree
            ? baseQP + slice->pic->gopAdaptedQP
            : getCascadeQP( *m_pcEncCfg, *slice->pic->gopEntry, slice->isIntra(), baseQP + slice->pic->gopAdaptedQP, lumaQpBDOffset );
 
@@ -540,7 +601,8 @@ int EncSlice::xGetQPForPicture( const Slice* slice, const int baseQP )
 
     // An intra picture at a change of content (film credits: a new card) comes out of the dependency model little
     // reused, and would be coded coarser than the pictures that predict from it: never above the configured QP plus one.
-    if( m_pcEncCfg->m_cuTreePicScale > 0.0 && hasBlockOffsets && slice->isIntra() && slice->pic->m_picShared->m_capIntraQp )
+    // (With FlatInterQP the credit only lowers an I picture below its flat level.)
+    if( picQpFromCuTree && slice->isIntra() && slice->pic->m_picShared->m_capIntraQp )
     {
       const int configuredQp = baseQP - ( m_pcEncCfg->m_QP - m_pcEncCfg->m_configuredQP ) + slice->pic->gopAdaptedQP;
       qp = std::min( qp, configuredQp + 1 );
@@ -673,6 +735,11 @@ void EncSlice::compressSlice( Picture* pic )
   if( slice->sps->fpelMmvd && !slice->picHeader->disFracMMVD )
   {
     slice->picHeader->disFracMMVD = ( pic->lwidth() * pic->lheight() > 1920 * 1080 ) ? true : false;
+  }
+
+  if( m_psyRdCost.usePsy() && startCtuTsAddr == 0 )   // once per picture (its first slice), before any CTU task
+  {
+    m_psyRdCost.buildPsyOrgEnergies( *pic, slice->sps->bitDepths[ CH_L ] );
   }
 
   xProcessCtus( pic, startCtuTsAddr, boundingCtuTsAddr );

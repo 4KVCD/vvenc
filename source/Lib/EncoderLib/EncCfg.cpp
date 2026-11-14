@@ -61,6 +61,8 @@ VVEncCfg::VVEncCfg()
   , m_QPFraction( 0.0 )
   , m_fgaStrength( 0.0 )
   , m_fgaInterval( 0 )
+  , m_psyRdStrength( 0.0 )
+  , m_psyRdoqStrength( 0.0 )
 {
   m_fg.m_fgcSEIEnabled = false;
   m_fg.m_fgcSEICompModelPresent[0] = false;
@@ -81,6 +83,31 @@ int getCuTreeLookAheadGops( const vvenc_config& c )
   return c.m_cuTreeLookAheadGOPs > 0 ? c.m_cuTreeLookAheadGOPs : 1;
 }
 
+void initMCTFStrengths( vvencMCTF& mctf, int GOPSize, int QP, int QPFractionVal, bool rateControl )
+{
+  const int    log2GopSize = std::min<int>( 6, floorLog2( GOPSize ) );
+  const double exactQP     = QP + QPFractionVal / 256.0;
+
+  mctf.numFrames = mctf.numStrength = std::max( 1, log2GopSize - ( ( QP - ( rateControl ? 1 : 0 ) ) >> 4 ) );
+
+  for( int i = 0; i < mctf.numFrames; i++ )
+  {
+    mctf.MCTFFrames[i]    = GOPSize >> ( mctf.numFrames - i - 1 );
+    mctf.MCTFStrengths[i] = Clip3( 0.0, 2.0, ( exactQP - 4.0 ) / 8.0 ) / double( mctf.numFrames - i );
+  }
+  mctf.MCTFStrengths[mctf.numFrames - 1] = Clip3( 0.0, 1.5, ( exactQP - 4.0 ) * 3.0 / 32.0 );
+}
+
+void turnOffToolsForVeryLowQP( vvenc_config& cfg )
+{
+  cfg.m_LFNST    = 0;
+  cfg.m_BDOF     = 0;
+  cfg.m_DMVR     = 0;
+  cfg.m_PROF     = 0;
+  cfg.m_SbTMVP   = 0;
+  cfg.m_MinQT[1] = std::max( cfg.m_MinQT[1], 8u );
+}
+
 static unsigned getMaxTlVal( unsigned perTlVal )
 {
   unsigned maxVal = 0;
@@ -92,9 +119,17 @@ static unsigned getMaxTlVal( unsigned perTlVal )
   return maxVal;
 }
 
+// The strengths behind the psy multipliers' 1.0 (--Tune grain): psy-rd's weight of the energy change against sqrt(lambda)
+// x SSE units, and psy-rdoq's level credit, 0.3 of it, the values the tune was measured with.
+static constexpr double PSY_RD_UNIT   = 20.0;
+static constexpr double PSY_RDOQ_UNIT = 0.3 * PSY_RD_UNIT;
+
 int getCodingQp( const vvenc_config& c )
 {
-  const int offset = c.m_cuTreePicStrength > 0 ? int( 3.0 + 2.0 * c.m_cuTreePicStrength / 32.0 + 0.5 ) : 0;
+  // the picture QPs from the dependency model replace the QP cascade and lower the referenced pictures' QPs: code from
+  // a higher QP to keep about the cascade's rate; with FlatInterQP they only lower the flat levels, which keep their own
+  // offset (EncSlice::getCascadeQP)
+  const int offset = c.m_cuTreePicStrength > 0 && ! c.m_flatInterQP ? int( 3.0 + 2.0 * c.m_cuTreePicStrength / 32.0 + 0.5 ) : 0;
   return std::min( c.m_QP + offset, MAX_QP );
 }
 
@@ -109,6 +144,8 @@ void VVEncCfg::xInitCfgMembers()
   m_QPFraction          = m_QPFractionVal / 256.0;
   m_fgaStrength         = m_fgaStrengthVal / 64.0;
   m_fgaInterval         = m_fgaIntervalLog2 >= 0 && m_fgaIntervalLog2 <= 6 ? 1 << m_fgaIntervalLog2 : m_GOPSize;
+  m_psyRdStrength       = PSY_RD_UNIT * m_psyRdStrengthVal / 64.0;
+  m_psyRdoqStrength     = PSY_RDOQ_UNIT * m_psyRdoqStrengthVal / 64.0;
   m_MaxQT[0]            =
   m_MaxQT[1]            = 
   m_MaxQT[2]            = m_CTUSize;

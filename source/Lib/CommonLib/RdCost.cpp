@@ -49,6 +49,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "RdCost.h"
 #include "Rom.h"
+#include "Picture.h"
 #include "UnitPartitioner.h"
 #include "SearchSpaceCounter.h"
 
@@ -79,6 +80,301 @@ void RdCost::setLambda( double dLambda, const BitDepths &bitDepths )
   m_dLambdaMotionSAD = sqrt(m_dLambda);
 }
 
+
+// the L1 norm of an n x n block's unnormalized Walsh-Hadamard transform over its psy band: for n = 8 / 4 the fine band
+// PSY_BAND_8x8 / _4x4 (RdCost.h), for n = 1 / 2 (ISP sub-partitions, too small for a band) every AC coefficient. The
+// transform is linear and maps a constant block to its DC coefficient alone, which no band holds, so no mean needs to be
+// removed.
+int64_t RdCost::xPsyBandL1( const Pel* src, ptrdiff_t stride, int n )
+{
+  int blk[64];
+  for( int y = 0; y < n; y++ )
+    for( int x = 0; x < n; x++ )
+      blk[y * n + x] = src[y * stride + x];
+  for( int len = 1; len < n; len <<= 1 )   // along the rows
+    for( int y = 0; y < n; y++ )
+      for( int x = 0; x < n; x += 2 * len )
+        for( int k = x; k < x + len; k++ )
+        {
+          const int a = blk[y * n + k], b = blk[y * n + k + len];
+          blk[y * n + k] = a + b; blk[y * n + k + len] = a - b;
+        }
+  for( int len = 1; len < n; len <<= 1 )   // along the columns
+    for( int y = 0; y < n; y += 2 * len )
+      for( int k = y; k < y + len; k++ )
+        for( int x = 0; x < n; x++ )
+        {
+          const int a = blk[k * n + x], b = blk[( k + len ) * n + x];
+          blk[k * n + x] = a + b; blk[( k + len ) * n + x] = a - b;
+        }
+  int64_t energy = 0;
+  if( n >= 4 )
+  {
+    const int32_t* keep = n == 8 ? PSY_BAND_8x8.keep : PSY_BAND_4x4.keep;
+    for( int i = 0; i < n * n; i++ )
+      energy += std::abs( blk[i] ) & keep[i];
+  }
+  else
+  {
+    for( int i = 1; i < n * n; i++ )
+      energy += std::abs( blk[i] );
+  }
+  return energy;
+}
+
+// the same for the n x n block a + b, the sum taken as Pel (the unclipped prediction + residual of the transform decisions)
+static int64_t psyBandSum( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int n )
+{
+  Pel sum[64];
+  for( int y = 0; y < n; y++ )
+    for( int x = 0; x < n; x++ )
+      sum[y * n + x] = Pel( a[y * aStride + x] + b[y * bStride + x] );
+  return RdCost::xPsyBandL1( sum, n, n );
+}
+
+int64_t RdCost::xPsyBand8x8Sum( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride )
+{
+  return psyBandSum( a, aStride, b, bStride, 8 );
+}
+
+int64_t RdCost::xPsyBand4x4Sum( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride )
+{
+  return psyBandSum( a, aStride, b, bStride, 4 );
+}
+
+int64_t RdCost::xPsyEnergy( const Pel* src, ptrdiff_t stride, int n, int shift ) const
+{
+  const int64_t l1 = n == 8 ? m_psyBand8x8( src, stride )
+                   : n == 4 ? m_psyBand4x4( src, stride )
+                            : xPsyBandL1( src, stride, n );
+  return ( l1 / n ) >> shift;   // / n: the unnormalized transform's gain; >> shift: to 8-bit sample units
+}
+
+// The structure tensors ( Jxx, Jyy, Jxy ) of the fine band of the 16x16 tiles at every 4-sample grid position that lies
+// inside the picture: in a tile, the band is f = 25 x sample - its 5x5 sum on the inner 12x12, and the tensor sums the
+// products of f's central differences over the inner 10x10. A tile's inner 5x5 sums never reach outside the tile, so f and
+// its gradient products are per-sample quantities of the picture: each is computed once, in one pass down the rows (ring
+// buffers of 5 rows of horizontal 5-sums and 3 rows of f), and a tile's 10x10 sum is a difference of prefix sums along the
+// row (per tile column) and of running sums down the columns (snapshots at the tiles' first rows). onTile( x, y, J ) is
+// called for every tile, row by row.
+template<typename OnTile>
+static void forEachPsyTileTensor( const CPelBuf& org, OnTile onTile )
+{
+  const int W = int( org.width ), H = int( org.height );
+  if( W < 16 || H < 16 )
+  {
+    return;
+  }
+  const int tilesX = ( W - 16 ) / 4 + 1, tilesY = ( H - 16 ) / 4 + 1;
+  const int lastX  = 4 * ( tilesX - 1 ) + 12, lastY = 4 * ( tilesY - 1 ) + 12;   // the last gradient column and row used
+  std::vector<int>     h5( 5 * W ), f( 3 * W );                 // rings: h5 row r at ( r % 5 ), f row r at ( r % 3 )
+  std::vector<int64_t> rowPrefix( 3 * ( lastX + 2 ), 0 );       // this row's prefix sums of the three products (at 3: 0)
+  std::vector<int64_t> colSum( 3 * tilesX, 0 ), firstRowSum( 3 * 3 * tilesX );   // running sums; ring of 3 tile rows
+  auto h5Row = [&]( int r ) {
+    const Pel* v = org.bufAt( 0, r );
+    int*       h = &h5[( r % 5 ) * W];
+    for( int x = 2; x < W - 2; x++ )
+    {
+      h[x] = v[x - 2] + v[x - 1] + v[x] + v[x + 1] + v[x + 2];
+    }
+  };
+  for( int r = 0; r < 4; r++ )
+  {
+    h5Row( r );
+  }
+  for( int r = 2; r <= lastY + 1; r++ )   // f row r, then the gradient row r - 1
+  {
+    h5Row( r + 2 );
+    const Pel* v = org.bufAt( 0, r );
+    int*       fr = &f[( r % 3 ) * W];
+    for( int x = 2; x <= lastX + 1; x++ )
+    {
+      fr[x] = 25 * v[x] - ( h5[( ( r - 2 ) % 5 ) * W + x] + h5[( ( r - 1 ) % 5 ) * W + x] + h5[( r % 5 ) * W + x]
+                            + h5[( ( r + 1 ) % 5 ) * W + x] + h5[( ( r + 2 ) % 5 ) * W + x] );
+    }
+    const int y = r - 1;
+    if( y < 3 )
+    {
+      continue;
+    }
+    if( ( y - 3 ) % 4 == 0 && ( y - 3 ) / 4 < tilesY )   // the first row of tile row ( y - 3 ) / 4: keep the sums above it
+    {
+      std::copy( colSum.begin(), colSum.end(), firstRowSum.begin() + 3 * tilesX * ( ( ( y - 3 ) / 4 ) % 3 ) );
+    }
+    const int* fu = &f[( ( y - 1 ) % 3 ) * W];
+    const int* fc = &f[( y % 3 ) * W];
+    const int* fd = &f[( ( y + 1 ) % 3 ) * W];
+    int64_t    pxx = 0, pyy = 0, pxy = 0;
+    for( int x = 3; x <= lastX; x++ )   // rowPrefix[ x + 1 ] = the sums over columns 3 .. x
+    {
+      const int64_t gx = fc[x + 1] - fc[x - 1];
+      const int64_t gy = fd[x] - fu[x];
+      pxx += gx * gx;
+      pyy += gy * gy;
+      pxy += gx * gy;
+      rowPrefix[3 * ( x + 1 )] = pxx;
+      rowPrefix[3 * ( x + 1 ) + 1] = pyy;
+      rowPrefix[3 * ( x + 1 ) + 2] = pxy;
+    }
+    for( int tx = 0; tx < tilesX; tx++ )   // columns 4 tx + 3 .. 4 tx + 12
+      for( int k = 0; k < 3; k++ )
+      {
+        colSum[3 * tx + k] += rowPrefix[3 * ( 4 * tx + 13 ) + k] - rowPrefix[3 * ( 4 * tx + 3 ) + k];
+      }
+    if( ( y - 12 ) % 4 == 0 && y >= 12 )   // the last row of tile row ( y - 12 ) / 4
+    {
+      const int      ty    = ( y - 12 ) / 4;
+      const int64_t* above = &firstRowSum[3 * tilesX * ( ty % 3 )];
+      for( int tx = 0; tx < tilesX; tx++ )
+      {
+        const int64_t J[3] = { colSum[3 * tx] - above[3 * tx], colSum[3 * tx + 1] - above[3 * tx + 1], colSum[3 * tx + 2] - above[3 * tx + 2] };
+        onTile( tx, ty, J );
+      }
+    }
+  }
+}
+
+// Psy-rd rewards the reconstruction's fine energy; in grain an angular intra mode earns that reward with a directional
+// streak (a brush stroke). IntraSearch withholds part of the reward from angular modes, but not near real source edges,
+// where a directional mode is right. A 16x16 tile at a 4-sample grid position is an edge when its fine band is coherent
+// (c = ( l1 - l2 ) / ( l1 + l2 ) of the structure tensor > 0.6) and strong (RMS gradient > 4 x the median of the
+// picture's grain-like tiles, c < 0.43, sampled every 16 samples); every position with an edge tile within 4 grid units
+// (16 samples) in both directions is gated. Tiles crossing the right or bottom picture edge are never edges.
+static void buildPsyEdgeGate( Picture& pic, const CPelBuf& org, int gridW, int gridH )
+{
+  const size_t        n = size_t( gridW ) * gridH;
+  std::vector<double> g( n, 0.0 ), c( n, 0.0 ), grainG;
+  forEachPsyTileTensor( org, [&]( int x, int y, const int64_t t[3] ) {
+    const double tr = double( t[0] + t[1] );
+    const size_t i  = size_t( y ) * gridW + x;
+    g[i] = sqrt( std::max( tr, 0.0 ) );
+    c[i] = tr > 0 ? sqrt( double( t[0] - t[1] ) * double( t[0] - t[1] ) + 4.0 * double( t[2] ) * double( t[2] ) ) / tr : 0.0;
+    if( !( ( x | y ) & 3 ) && c[i] < 0.43 )
+    {
+      grainG.push_back( g[i] );
+    }
+  } );
+  double grainLevel = 0;
+  if( !grainG.empty() )
+  {
+    std::nth_element( grainG.begin(), grainG.begin() + grainG.size() / 2, grainG.end() );
+    grainLevel = grainG[grainG.size() / 2];
+  }
+  // dilation by 4 grid units, separable: along rows into rowGate, then along columns
+  const int            reach = 4;
+  std::vector<uint8_t> rowGate( n, 0 );
+  for( int y = 0; y < gridH; y++ )
+    for( int x = 0; x < gridW; x++ )
+    {
+      const size_t i = size_t( y ) * gridW + x;
+      if( c[i] > 0.6 && g[i] > 4.0 * grainLevel )
+      {
+        for( int xx = std::max( 0, x - reach ); xx <= std::min( gridW - 1, x + reach ); xx++ )
+        {
+          rowGate[size_t( y ) * gridW + xx] = 1;
+        }
+      }
+    }
+  pic.psyEdgeGate.assign( n, 0 );
+  for( int y = 0; y < gridH; y++ )
+    for( int x = 0; x < gridW; x++ )
+    {
+      if( rowGate[size_t( y ) * gridW + x] )
+      {
+        for( int yy = std::max( 0, y - reach ); yy <= std::min( gridH - 1, y + reach ); yy++ )
+        {
+          pic.psyEdgeGate[size_t( yy ) * gridW + x] = 1;
+        }
+      }
+    }
+}
+
+// The source side of the psy distortion is the same for every candidate at a position, so its energies are computed
+// once per picture, on the 4-sample grid every psy block starts on (coding areas start on it; blocks are 4 or 8 apart).
+// 8x8 blocks crossing the right or bottom picture edge are never looked up: their entries stay 0.
+void RdCost::buildPsyOrgEnergies( Picture& pic, int bitDepth ) const
+{
+  const CPelBuf org   = pic.getOrigBuf( COMP_Y );
+  const int     shift = bitDepth - 8;
+  const int     gridW = int( org.width ) / 4, gridH = int( org.height ) / 4;
+  pic.psyGridW = gridW;
+  pic.psyOrgEnergy[0].assign( size_t( gridW ) * gridH, 0 );
+  pic.psyOrgEnergy[1].assign( size_t( gridW ) * gridH, 0 );
+  for( int y = 0; y < gridH; y++ )
+    for( int x = 0; x < gridW; x++ )
+    {
+      const Pel* src = org.bufAt( 4 * x, 4 * y );
+      if( 4 * x + 8 <= int( org.width ) && 4 * y + 8 <= int( org.height ) )
+        pic.psyOrgEnergy[0][y * gridW + x] = int32_t( xPsyEnergy( src, org.stride, 8, shift ) );
+      pic.psyOrgEnergy[1][y * gridW + x] = int32_t( xPsyEnergy( src, org.stride, 4, shift ) );
+    }
+  buildPsyEdgeGate( pic, org, gridW, gridH );
+}
+
+// the source's energy of the n x n block at picture position ( x, y ), from the picture's table; ISP sub-partitions
+// 1 or 2 samples wide give n = 1 or 2 at positions off the 4-sample grid: those are computed here
+int64_t RdCost::xPsyOrgEnergy( const Picture& pic, const CPelBuf& org, int x, int y, int xInArea, int yInArea, int n, int shift ) const
+{
+  const std::vector<int32_t>& table = pic.psyOrgEnergy[n == 8 ? 0 : 1];
+  if( table.empty() || ( n != 8 && n != 4 ) || ( ( x | y ) & 3 ) )
+  {
+    return xPsyEnergy( org.bufAt( xInArea, yInArea ), org.stride, n, shift );
+  }
+  return table[( y >> 2 ) * pic.psyGridW + ( x >> 2 )];
+}
+
+Distortion RdCost::getPsyDistortion( const Picture& pic, const CompArea& area, const CPelBuf& rec, const CPelBuf& resi, int bitDepth ) const
+{
+  const CPelBuf org   = pic.getOrigBuf( area );
+  const int     n     = std::min<int>( 8, std::min<int>( org.width, org.height ) );
+  const int     shift = bitDepth - 8;
+  int64_t       diff  = 0;
+  Pel           sum[64];
+  for( int y = 0; y + n <= int( org.height ); y += n )
+    for( int x = 0; x + n <= int( org.width ); x += n )
+    {
+      int64_t recEnergy;
+      if( resi.buf && n == 8 )   // the kernels add the residual themselves
+      {
+        recEnergy = ( m_psyBand8x8Sum( rec.bufAt( x, y ), rec.stride, resi.bufAt( x, y ), resi.stride ) / 8 ) >> shift;
+      }
+      else if( resi.buf && n == 4 )
+      {
+        recEnergy = ( m_psyBand4x4Sum( rec.bufAt( x, y ), rec.stride, resi.bufAt( x, y ), resi.stride ) / 4 ) >> shift;
+      }
+      else if( resi.buf )
+      {
+        for( int j = 0; j < n; j++ )
+          for( int i = 0; i < n; i++ )
+            sum[j * n + i] = Pel( rec.at( x + i, y + j ) + resi.at( x + i, y + j ) );   // not clipped: an estimate
+        recEnergy = xPsyEnergy( sum, n, n, shift );
+      }
+      else
+      {
+        recEnergy = xPsyEnergy( rec.bufAt( x, y ), rec.stride, n, shift );
+      }
+      if( m_psyRecCredit != 1.0 )
+      {
+        recEnergy = int64_t( double( recEnergy ) * m_psyRecCredit + 0.5 );
+      }
+      diff += std::abs( xPsyOrgEnergy( pic, org, area.x + x, area.y + y, x, y, n, shift ) - recEnergy );
+    }
+  return Distortion( m_psyStrength * sqrt( m_dLambda ) * double( diff ) + 0.5 );
+}
+
+int64_t RdCost::getPsyEnergyGap( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const
+{
+  const CPelBuf org   = pic.getOrigBuf( area );
+  const int     shift = bitDepth - 8;
+  int64_t       gap   = 0;
+  for( int y = 0; y + 8 <= int( org.height ); y += 8 )
+    for( int x = 0; x + 8 <= int( org.width ); x += 8 )
+    {
+      const int64_t recEnergy = xPsyEnergy( rec.bufAt( x, y ), rec.stride, 8, shift );
+      gap += std::abs( xPsyOrgEnergy( pic, org, area.x + x, area.y + y, x, y, 8, shift ) - recEnergy );
+    }
+  return gap;
+}
 
 // Initialize Function Pointer by [eDFunc]
 void RdCost::create( bool enableOpt )
@@ -129,6 +425,10 @@ void RdCost::create( bool enableOpt )
 
   m_fxdWtdPredPtr = fixWeightedSSE_Core;
   m_bvBitsLineIBC = bvBitsLineCore;
+  m_psyBand8x8    = RdCost::xPsyBand8x8;
+  m_psyBand8x8Sum = RdCost::xPsyBand8x8Sum;
+  m_psyBand4x4    = RdCost::xPsyBand4x4;
+  m_psyBand4x4Sum = RdCost::xPsyBand4x4Sum;
 
   m_afpDistortFuncX5[0] = RdCost::xGetSAD8X5;
   m_afpDistortFuncX5[1] = RdCost::xGetSAD16X5;
