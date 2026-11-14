@@ -87,7 +87,8 @@ static void fastFwd1D_neon( const TMatrixCoeff* tc, const TCoeff* src, TCoeff* d
   int16x4_t s[trSize / 4];
   for( unsigned k = 0; k < trSize / 4; k++ )
   {
-    s[k] = vmovn_s32( vld1q_s32( src + 4 * k ) );
+    const int32x4_t v = vld1q_s32( src + 4 * k );
+    s[k]              = vmovn_s32( v );
   }
   const int32x4_t vshift = vdupq_n_s32( -shift );
 
