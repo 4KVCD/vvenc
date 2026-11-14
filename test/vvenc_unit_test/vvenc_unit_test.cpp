@@ -5257,9 +5257,8 @@ static bool check_mipMatrixMul( PelBufferOps* ref, PelBufferOps* opt, unsigned n
   return true;
 }
 
-// MIP upsampling: all reduced sizes and factors, 12-bit samples (the documented range of the SIMD version); every fourth
-// case alternates 0 and 4095 (the steepest ramps, both signs). The vertical pass is also run in place, with its source
-// rows inside the destination as in MatrixIntraPrediction::predBlock.
+// MIP upsampling: all reduced sizes and factors, 12-bit samples (the documented range of the SIMD version). The
+// vertical pass is also run in place, with its source rows inside the destination as in MatrixIntraPrediction::predBlock.
 static bool check_mipUpsampling( PelBufferOps* ref, PelBufferOps* opt, unsigned num_cases )
 {
   printf( "Testing PelBufferOps::mipUpsampleHor, mipUpsampleVer\n" );
@@ -5271,6 +5270,7 @@ static bool check_mipUpsampling( PelBufferOps* ref, PelBufferOps* opt, unsigned 
     const SizeType predSize   = rng.getOneOf<SizeType>( { 4, 8 } );
     const unsigned log2Factor = rng.get( 1, 3 );
     const SizeType factor     = 1 << log2Factor;
+    // every fourth case alternates 0 and 4095: the steepest ramps, both signs
     auto extremes = [i]( std::vector<Pel>& v )
     {
       if( i % 4 == 0 )

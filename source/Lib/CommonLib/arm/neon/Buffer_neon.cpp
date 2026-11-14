@@ -1984,9 +1984,10 @@ static void sumSquaredErrorParts_neon( const Pel* src0, const ptrdiff_t stride0,
 }
 
 // MIP upsampling (MatrixIntraPrediction::predBlock): with diff = behind - before, phase p = 0 .. 2^L - 1 is
-// ( ( before << L ) + 2^(L-1) + ( p + 1 ) * diff ) >> L = before + ( ( ( p + 1 ) * diff + 2^(L-1) ) >> L ) (before << L is
-// a multiple of 2^L), i.e. vrsra( before, ( p + 1 ) * diff, L ); the last phase is behind itself. For samples of up to
-// 12 bits (the range of the SIMD versions) ( p + 1 ) * diff fits int16, and vrsra rounds in wider precision.
+// ( ( before << L ) + 2^(L-1) + ( p + 1 ) * diff ) >> L = before + ( ( ( p + 1 ) * diff + 2^(L-1) ) >> L )
+// (before << L is a multiple of 2^L), i.e. vrsra( before, ( p + 1 ) * diff, L ); the last phase is behind itself. For
+// samples of up to 12 bits (the range of the SIMD versions) ( p + 1 ) * diff fits int16, and vrsra rounds in wider
+// precision.
 template<unsigned L>
 static inline void mipInterpolate_neon( const int16x8_t before, const int16x8_t behind, int16x8_t* out )
 {
@@ -2011,10 +2012,10 @@ static inline void mipInterpolate_neon( const int16x4_t before, const int16x4_t 
   out[( 1 << L ) - 1] = behind;
 }
 
-// one row of the horizontal pass: out[i * 2^L + p] = v[p][i], one overload per factor (tag MipLog2Factor<L>). Factors 2 and 4 with
-// interleaving stores; factor 8 zips the phases in pairs, so that each 32-bit lane i of the four zipped vectors holds
-// phases 2j, 2j + 1 of sample i, and a 4-way interleaving store of 32-bit lanes writes them in order (dst is only 2-byte
-// aligned: fine for ST4).
+// one row of the horizontal pass: out[i * 2^L + p] = v[p][i], one overload per factor (tag MipLog2Factor<L>).
+// Factors 2 and 4 with interleaving stores; factor 8 zips the phases in pairs, so that each 32-bit lane i of the four
+// zipped vectors holds phases 2j, 2j + 1 of sample i, and a 4-way interleaving store of 32-bit lanes writes them in
+// order (dst is only 2-byte aligned: fine for ST4).
 template<unsigned L> struct MipLog2Factor {};
 
 static inline void mipStoreRow_neon( Pel* dst, const int16x8_t* v, MipLog2Factor<1> )
