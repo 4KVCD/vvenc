@@ -133,6 +133,28 @@ static constexpr PsyBandMask PSY_BAND_8x8 = psyBandMask( 8, 4 );
 static constexpr int    PSY_NUM_GROUPS   = 6;
 static constexpr double PSY_GROUP_WEIGHT = 0.25;
 
+// Grain patchwork ("some blocks have grain, their neighbours do not"): a large block coded with little residual is a
+// cheap choice that keeps half the grain while the blocks around it split and keep it; later pictures inherit both. A
+// block that lost a fraction f of the source's band energy therefore pays ( 1 + PSY_DEFICIT_CONVEXITY x f ) times its
+// band-energy difference: one block at half the grain costs more than two blocks at three quarters, which evens the
+// grain out between neighbours. Energy above the source's keeps its plain weight. Where the term acts, psy-rd's base
+// strength goes down to PSY_GRAIN_BASE_STRENGTH of its value: the same patchwork, missing grain and pulsing as
+// convexity 2 at full strength with fewer block and structure artifacts and half the growth in bytes per QP
+// (gangster_chase at equal size, 4 rate points).
+static constexpr double PSY_DEFICIT_CONVEXITY   = 4.0;
+static constexpr double PSY_GRAIN_BASE_STRENGTH = 0.59375;   // 19 / 32: a value --PsyRD can take
+// On clean video the same term buys grain-like energy the source does not have (wrath_of_man at equal size: brush
+// strokes, patchwork and flicker about doubled). So it scales with the picture's grain floor (the 10th percentile of
+// the source's 8x8 band energies, RdCost::buildPsyOrgEnergies): none up to PSY_GRAIN_FLOOR_NONE, full from
+// PSY_GRAIN_FLOOR_FULL.
+static constexpr int    PSY_GRAIN_FLOOR_NONE  = 2;   // wrath_of_man: 2 on every picture
+static constexpr int    PSY_GRAIN_FLOOR_FULL  = 5;   // gangster_chase: 6 to 24
+// ... and with how much of the picture's fine band changes from picture to picture (Picture::psyStableShare):
+// animation, graphics and repeated pictures are stable (57-100 % of the blocks in the test clips; the term cost
+// detective_conan 14-43 % BD-rate), camera sources are not (0-9 %). Full up to PSY_STABLE_SHARE_FULL, none from _NONE.
+static constexpr double PSY_STABLE_SHARE_FULL = 0.15;
+static constexpr double PSY_STABLE_SHARE_NONE = 0.40;
+
 struct PsyGroupMasks
 {
   alignas( 32 ) int32_t keep[PSY_NUM_GROUPS][64];

@@ -156,6 +156,13 @@ struct Picture : public UnitArea
   // the same of the 4x4 block (PSY_NUM_GROUPS_4x4 per position)
   std::vector<int32_t> psyOrgGroups4x4;
   int                  psyGridW = 0;
+  // psy-rd: the convexity of the lost-grain term for this picture (RdCost.h: PSY_DEFICIT_CONVEXITY x its grain share)
+  double               psyDeficitConvexity = 0.0;
+  // psy-rd: the factor on psy-rd's strength for this picture (RdCost.h: PSY_GRAIN_BASE_STRENGTH where the term is full)
+  double               psyStrengthScale = 1.0;
+  // psy-rd: the share of the source's fine-band blocks that did not change against the neighbouring source picture
+  // (PreProcess::xGetPsyStableShare): animation, graphics and repeated pictures are stable, camera grain is not
+  float                psyStableShare = 0.f;
   // psy-rd: 1 at a 4-sample grid position (psyGridW per row) whose 16x16 tile lies within 16 samples of a source edge
   // (RdCost::buildPsyEdgeGate); empty when psy is off
   std::vector<uint8_t> psyEdgeGate;

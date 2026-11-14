@@ -402,6 +402,31 @@ void RdCost::buildPsyOrgEnergies( Picture& pic, int bitDepth ) const
       pic.psyOrgEnergy[1][y * gridW + x] = int32_t( ( l1 / 4 ) >> shift );
     }
   buildPsyEdgeGate( pic, org, gridW, gridH );
+  // The picture's grain floor: the 10th percentile of the source's 8x8 band energies, blocks of exactly zero energy
+  // (black bars, flat graphics) left out. A source with grain has it everywhere, also in its flattest tenth; a clean
+  // source reads next to nothing there. The convexity of the lost-grain term follows it (see PSY_GRAIN_FLOOR_NONE).
+  int histogram[256] = {};
+  int numBlocks = 0;
+  for( int y = 0; 4 * y + 8 <= int( org.height ); y++ )
+    for( int x = 0; 4 * x + 8 <= int( org.width ); x++ )
+    {
+      const int energy = pic.psyOrgEnergy[0][y * gridW + x];
+      if( energy > 0 )
+      {
+        histogram[std::min( energy, 255 )]++;
+        numBlocks++;
+      }
+    }
+  int floorEnergy = 0, numBelow = 0;   // the smallest energy with more than a tenth of the blocks at or below it
+  while( floorEnergy < 255 && ( numBelow + histogram[floorEnergy] ) * 10 <= numBlocks )
+  {
+    numBelow += histogram[floorEnergy++];
+  }
+  const double grainShare  = Clip3( 0.0, 1.0, double( floorEnergy - PSY_GRAIN_FLOOR_NONE ) / double( PSY_GRAIN_FLOOR_FULL - PSY_GRAIN_FLOOR_NONE ) );
+  const double changeShare = Clip3( 0.0, 1.0, ( PSY_STABLE_SHARE_NONE - double( pic.psyStableShare ) ) / ( PSY_STABLE_SHARE_NONE - PSY_STABLE_SHARE_FULL ) );
+  const double termShare  = numBlocks ? grainShare * changeShare : 0.0;
+  pic.psyDeficitConvexity = PSY_DEFICIT_CONVEXITY * termShare;
+  pic.psyStrengthScale    = 1.0 - ( 1.0 - PSY_GRAIN_BASE_STRENGTH ) * termShare;
 }
 
 // the source's energy of the n x n block at picture position ( x, y ), from the picture's table; ISP sub-partitions
@@ -450,7 +475,12 @@ Distortion RdCost::getPsyDistortion( const Picture& pic, const CompArea& area, c
         recEnergy = int64_t( double( recEnergy ) * m_psyRecCredit + 0.5 );
       }
       // the band-energy difference and, with PSY_GROUP_WEIGHT, the group-by-group difference (see PSY_GROUPS_8x8)
-      const int64_t energyDiff = std::abs( xPsyOrgEnergy( pic, org, area.x + x, area.y + y, x, y, n, shift ) - recEnergy );
+      const int64_t orgEnergy  = xPsyOrgEnergy( pic, org, area.x + x, area.y + y, x, y, n, shift );
+      int64_t       energyDiff = std::abs( orgEnergy - recEnergy );
+      if( recEnergy < orgEnergy && pic.psyDeficitConvexity > 0.0 )   // lost grain: convex in the lost fraction (see PSY_DEFICIT_CONVEXITY)
+      {
+        energyDiff += int64_t( pic.psyDeficitConvexity * double( energyDiff ) * double( energyDiff ) / double( orgEnergy ) + 0.5 );
+      }
       if( n < 4 )
       {
         groupDiff = ( xPsySliverDiff( org.bufAt( x, y ), org.stride, rec.bufAt( x, y ), rec.stride, resi.buf ? resi.bufAt( x, y ) : nullptr, resi.stride, n, m_psyRecCredit ) / n ) >> shift;

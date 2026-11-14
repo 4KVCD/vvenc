@@ -112,6 +112,7 @@ struct VVEncCfg : public vvenc_config
   double    m_fgaStrength;      // Film grain strength as the fraction of the analysed strength (0 <= value <  4)
   int       m_fgaInterval;      // Film grain analysis interval in pictures, 1 << m_fgaIntervalLog2 (automatic: the GOP size)
   double    m_psyRdStrength;    // psy-rd's strength in the RD cost, decoded from the multiplier m_psyRdStrengthVal (0: off)
+  double    psyRdStrength( double pictureScale ) const;   // the same for a picture whose strength is scaled (Picture::psyStrengthScale)
   double    m_psyRdoqStrength;  // psy-rdoq's strength in DepQuant, decoded from the multiplier m_psyRdoqStrengthVal (0: off)
 
 

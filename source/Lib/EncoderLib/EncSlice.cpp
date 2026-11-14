@@ -556,7 +556,7 @@ double EncSlice::getPsyRdStrength( const VVEncCfg& encCfg, const Slice& slice )
     const double lowestInterQp = getLowestInterQP( encCfg, encCfg.m_QP ) + encCfg.m_QPFraction;
     dQp = std::max( 0.0, pictureQp - lowestInterQp );
   }
-  return encCfg.m_psyRdStrength * pow( 2.0, dQp / 6.0 );
+  return encCfg.psyRdStrength( slice.pic->psyStrengthScale ) * pow( 2.0, dQp / 6.0 );
 }
 
 double EncSlice::xGetQPForPicture( const Slice* slice )
@@ -717,6 +717,12 @@ void EncSlice::compressSlice( Picture* pic )
     cs.initStructData( slice->sliceQp );
   }
 
+  // once per picture (its first slice), before any CTU task and before the SAO set-up below reads the picture's psy strength
+  if( m_psyRdCost.usePsy() && startCtuTsAddr == 0 )
+  {
+    m_psyRdCost.buildPsyOrgEnergies( *pic, slice->sps->bitDepths[ CH_L ] );
+  }
+
   for( auto* lnRsrc : m_TileLineEncRsrc )
   {
     lnRsrc->m_CABACEstimator    .initCtxModels( *slice );
@@ -735,11 +741,6 @@ void EncSlice::compressSlice( Picture* pic )
   if( slice->sps->fpelMmvd && !slice->picHeader->disFracMMVD )
   {
     slice->picHeader->disFracMMVD = ( pic->lwidth() * pic->lheight() > 1920 * 1080 ) ? true : false;
-  }
-
-  if( m_psyRdCost.usePsy() && startCtuTsAddr == 0 )   // once per picture (its first slice), before any CTU task
-  {
-    m_psyRdCost.buildPsyOrgEnergies( *pic, slice->sps->bitDepths[ CH_L ] );
   }
 
   xProcessCtus( pic, startCtuTsAddr, boundingCtuTsAddr );

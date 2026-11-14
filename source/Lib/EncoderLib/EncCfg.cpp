@@ -133,6 +133,12 @@ int getCodingQp( const vvenc_config& c )
   return std::min( c.m_QP + offset, MAX_QP );
 }
 
+// ( multiplier x scale ) first: a scale that gives a multiplier --PsyRD can take gives exactly that option's strength
+double VVEncCfg::psyRdStrength( double pictureScale ) const
+{
+  return PSY_RD_UNIT * ( m_psyRdStrengthVal * pictureScale ) / 64.0;
+}
+
 void VVEncCfg::xInitCfgMembers()
 {
   m_configuredQP        = m_QP;
@@ -144,7 +150,7 @@ void VVEncCfg::xInitCfgMembers()
   m_QPFraction          = m_QPFractionVal / 256.0;
   m_fgaStrength         = m_fgaStrengthVal / 64.0;
   m_fgaInterval         = m_fgaIntervalLog2 >= 0 && m_fgaIntervalLog2 <= 6 ? 1 << m_fgaIntervalLog2 : m_GOPSize;
-  m_psyRdStrength       = PSY_RD_UNIT * m_psyRdStrengthVal / 64.0;
+  m_psyRdStrength       = psyRdStrength( 1.0 );
   m_psyRdoqStrength     = PSY_RDOQ_UNIT * m_psyRdoqStrengthVal / 64.0;
   m_MaxQT[0]            =
   m_MaxQT[1]            = 
