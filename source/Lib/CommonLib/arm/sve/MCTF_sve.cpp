@@ -275,13 +275,13 @@ struct SquareSumSve
   int sum() const { return ( int )vaddvq_s64( acc ); }
 };
 
-static void motionErrorLumaFracColumn_loRes_sve( const Pel* org, const ptrdiff_t origStride, const Pel* buf,
-                                                 const ptrdiff_t buffStride, const int w, const int h,
-                                                 const int16_t* xFilter, const int num, const int16_t* const* yFilter,
+// the vertical half of the column kernel; its horizontal half stays the NEON one (m_filterColumn4, set by the NEON init)
+static void motionErrorLumaFracColumn_loRes_sve( const Pel* org, const ptrdiff_t origStride, const Pel* filtered,
+                                                 const int w, const int h, const int num, const int16_t* const* yFilter,
                                                  const int* rowOffset, const int bitDepth, int* error )
 {
-  motionErrorLumaFracColumn_loRes_common<SquareSumSve>( org, origStride, buf, buffStride, w, h, xFilter, num, yFilter,
-                                                        rowOffset, bitDepth, error );
+  motionErrorLumaFracColumn_loRes_common<SquareSumSve>( org, origStride, filtered, w, h, num, yFilter, rowOffset,
+                                                        bitDepth, error );
 }
 
 void applyPlanarCorrection_sve( const Pel* refPel, const ptrdiff_t refStride, Pel* dstPel, const ptrdiff_t dstStride,

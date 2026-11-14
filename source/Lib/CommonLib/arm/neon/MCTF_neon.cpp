@@ -255,13 +255,44 @@ struct SquareSumNeon
   int sum() const { return horizontal_add_s32x4( vaddq_s32( lo, hi ) ); }
 };
 
-static void motionErrorLumaFracColumn_loRes_neon( const Pel* org, const ptrdiff_t origStride, const Pel* buf,
-                                                  const ptrdiff_t buffStride, const int w, const int h,
-                                                  const int16_t* xFilter, const int num, const int16_t* const* yFilter,
+// MCTF::m_filterColumn4, as filterColumn4_AVX2 (MCTFX86.h): the horizontal 4-tap pass of numRows rows into filtered
+// (stride w), row r from source row r - 1, taps on columns x - 1 .. x + 2. The sums are 32 bits (exact for every 16-bit
+// input, as the C code's int sums), rounded and clipped to [0, max] by vqrshrun_n_s32 and the min.
+static void filterColumn4_neon( const Pel* buf, const ptrdiff_t buffStride, const int w, const int numRows,
+                                const int16_t* xFilter, const int bitDepth, Pel* filtered )
+{
+  CHECKD( w > 32 || numRows > 36 || ( w & 7 ) != 0, "Unsupported block size" );
+
+  const int16x4_t  xf   = vld1_s16( xFilter );
+  const uint16x8_t vmax = vdupq_n_u16( ( 1 << bitDepth ) - 1 );
+  for( int r = 0; r < numRows; r++ )
+  {
+    const Pel* src = buf + ( r - 1 ) * buffStride - 1;
+    for( int x = 0; x < w; x += 8 )
+    {
+      int16x8_t s[4];
+      load_s16_16x8x4( src + x, 1, s );
+      int32x4_t lo = vmull_lane_s16( vget_low_s16( s[0] ), xf, 0 );
+      int32x4_t hi = vmull_lane_s16( vget_high_s16( s[0] ), xf, 0 );
+      lo = vmlal_lane_s16( lo, vget_low_s16( s[1] ), xf, 1 );
+      hi = vmlal_lane_s16( hi, vget_high_s16( s[1] ), xf, 1 );
+      lo = vmlal_lane_s16( lo, vget_low_s16( s[2] ), xf, 2 );
+      hi = vmlal_lane_s16( hi, vget_high_s16( s[2] ), xf, 2 );
+      lo = vmlal_lane_s16( lo, vget_low_s16( s[3] ), xf, 3 );
+      hi = vmlal_lane_s16( hi, vget_high_s16( s[3] ), xf, 3 );
+      // ( sum + 32 ) >> 6, clipped to [0, max]
+      const uint16x8_t v = vminq_u16( vcombine_u16( vqrshrun_n_s32( lo, 6 ), vqrshrun_n_s32( hi, 6 ) ), vmax );
+      vst1q_s16( filtered + r * w + x, vreinterpretq_s16_u16( v ) );
+    }
+  }
+}
+
+static void motionErrorLumaFracColumn_loRes_neon( const Pel* org, const ptrdiff_t origStride, const Pel* filtered,
+                                                  const int w, const int h, const int num, const int16_t* const* yFilter,
                                                   const int* rowOffset, const int bitDepth, int* error )
 {
-  motionErrorLumaFracColumn_loRes_common<SquareSumNeon>( org, origStride, buf, buffStride, w, h, xFilter, num, yFilter,
-                                                         rowOffset, bitDepth, error );
+  motionErrorLumaFracColumn_loRes_common<SquareSumNeon>( org, origStride, filtered, w, h, num, yFilter, rowOffset,
+                                                         bitDepth, error );
 }
 
 static int motionErrorLumaInt_neon( const Pel* org, const ptrdiff_t origStride, const Pel* buf,
@@ -1314,6 +1345,7 @@ template<>
 void MCTF::_initMCTF_ARM<NEON>()
 {
   m_motionErrorLumaFrac8[1] = motionErrorLumaFrac_loRes_neon;
+  m_filterColumn4 = filterColumn4_neon;   // the two column halves go together (MCTF::estimateLumaLn)
   m_motionErrorLumaFracColumn = motionErrorLumaFracColumn_loRes_neon;
   m_motionErrorLumaInt8     = motionErrorLumaInt_neon;
   m_applyPlanarCorrection   = applyPlanarCorrection_neon;
