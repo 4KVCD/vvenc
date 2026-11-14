@@ -576,10 +576,10 @@ static void padHorizontal_neon( Pel* src, const ptrdiff_t stride, const int widt
   for( int y = 0; y < height; y++, src += stride )
   {
     // both edge samples read before the left fill (its stores may alias src[width - 1] for the compiler)
-    const Pel left  = src[0];
-    const Pel right = src[width - 1];
-    fillRun_neon( src - marginLeft, marginLeft, left );
-    fillRun_neon( src + width, marginRight, right );
+    const Pel lftPel = src[0];
+    const Pel rgtPel = src[width - 1];
+    fillRun_neon( src - marginLeft, marginLeft, lftPel );
+    fillRun_neon( src + width, marginRight, rgtPel );
   }
 }
 
