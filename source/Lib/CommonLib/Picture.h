@@ -158,8 +158,9 @@ struct Picture : public UnitArea
   int                  psyGridW = 0;
   // psy-rd: the convexity of the lost-grain term for this picture (RdCost.h: PSY_DEFICIT_CONVEXITY x its grain share)
   double               psyDeficitConvexity = 0.0;
-  // psy-rd: the factor on psy-rd's strength for this picture (RdCost.h: PSY_GRAIN_BASE_STRENGTH where the term is full)
-  double               psyStrengthScale = 1.0;
+  // psy-rd: how much of the lost-grain term this picture gets, 0 (no grain) to 1 (RdCost::buildPsyOrgEnergies); it
+  // also sets the picture's psy-rd and psy-rdoq strength (EncSlice::getPsyRdStrength, getPsyRdoqStrength)
+  double               psyGrainShare = 0.0;
   // psy-rd: the share of the source's fine-band blocks that did not change against the neighbouring source picture
   // (PreProcess::xGetPsyStableShare): animation, graphics and repeated pictures are stable, camera grain is not
   float                psyStableShare = 0.f;

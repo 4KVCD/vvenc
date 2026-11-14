@@ -154,6 +154,15 @@ static constexpr int    PSY_GRAIN_FLOOR_FULL  = 5;   // gangster_chase: 6 to 24
 // detective_conan 14-43 % BD-rate), camera sources are not (0-9 %). Full up to PSY_STABLE_SHARE_FULL, none from _NONE.
 static constexpr double PSY_STABLE_SHARE_FULL = 0.15;
 static constexpr double PSY_STABLE_SHARE_NONE = 0.40;
+// A picture without grain (no term) codes with psy-rd and psy-rdoq at PSY_CLEAN_STRENGTH of their strength at low
+// rates: there the tune's kept energy on clean video is partly brush strokes (wrath_of_man at equal size, half
+// strength: strokes -48 % and -43 % at the two low rates, down to the default encoder's level, flicker and structure
+// about a third lower, for up to 7 points of fine energy, still well above the default encoder's). A quarter adds
+// little over a half. At high rates the half strength is a loss (3.2 MB: strokes +40 %, fine energy -4 points), so
+// the strength is full up to slice QP PSY_CLEAN_QP_FULL and falls to PSY_CLEAN_STRENGTH at PSY_CLEAN_QP_HALF.
+static constexpr double PSY_CLEAN_STRENGTH = 0.5;
+static constexpr int    PSY_CLEAN_QP_FULL  = 24;
+static constexpr int    PSY_CLEAN_QP_HALF  = 34;
 
 struct PsyGroupMasks
 {

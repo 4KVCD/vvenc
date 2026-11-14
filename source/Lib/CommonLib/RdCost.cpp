@@ -425,8 +425,8 @@ void RdCost::buildPsyOrgEnergies( Picture& pic, int bitDepth ) const
   const double grainShare  = Clip3( 0.0, 1.0, double( floorEnergy - PSY_GRAIN_FLOOR_NONE ) / double( PSY_GRAIN_FLOOR_FULL - PSY_GRAIN_FLOOR_NONE ) );
   const double changeShare = Clip3( 0.0, 1.0, ( PSY_STABLE_SHARE_NONE - double( pic.psyStableShare ) ) / ( PSY_STABLE_SHARE_NONE - PSY_STABLE_SHARE_FULL ) );
   const double termShare  = numBlocks ? grainShare * changeShare : 0.0;
+  pic.psyGrainShare       = termShare;
   pic.psyDeficitConvexity = PSY_DEFICIT_CONVEXITY * termShare;
-  pic.psyStrengthScale    = 1.0 - ( 1.0 - PSY_GRAIN_BASE_STRENGTH ) * termShare;
 }
 
 // the source's energy of the n x n block at picture position ( x, y ), from the picture's table; ISP sub-partitions

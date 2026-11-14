@@ -536,6 +536,17 @@ int EncSlice::getLowestInterQP( const VVEncCfg& encCfg, const int baseQP )
   return flatQP ? baseQP + kFlatQpOffset : baseQP;
 }
 
+// The factor on a psy strength for the slice's picture: grainScale on a picture with grain (the full lost-grain term);
+// on a picture without, PSY_CLEAN_STRENGTH at low rates and the full strength at high rates (see PSY_CLEAN_STRENGTH);
+// between grain and no grain it follows the picture's grain share
+static double psyPictureScale( const Slice& slice, double grainScale )
+{
+  const double grainShare   = slice.pic->psyGrainShare;
+  const double lowRateScale = PSY_CLEAN_STRENGTH + ( grainScale - PSY_CLEAN_STRENGTH ) * grainShare;
+  const double highRate     = Clip3( 0.0, 1.0, double( PSY_CLEAN_QP_HALF - slice.sliceQp ) / ( PSY_CLEAN_QP_HALF - PSY_CLEAN_QP_FULL ) );
+  return lowRateScale + ( 1.0 - grainShare ) * ( 1.0 - PSY_CLEAN_STRENGTH ) * highRate;
+}
+
 // The psy-rd strength of a slice. The psy-rd cost is strength x sqrt(lambda) x |energy change| (as x265), so on a picture
 // coded dQP above the GOP's lowest inter QP lambda grows 2^(dQP/3) but the psy term only 2^(dQP/6): psy would weigh
 // 2^(-dQP/6) less against the rate there, and the deep temporal layers would lose the grain energy the shallow ones keep.
@@ -556,7 +567,12 @@ double EncSlice::getPsyRdStrength( const VVEncCfg& encCfg, const Slice& slice )
     const double lowestInterQp = getLowestInterQP( encCfg, encCfg.m_QP ) + encCfg.m_QPFraction;
     dQp = std::max( 0.0, pictureQp - lowestInterQp );
   }
-  return encCfg.psyRdStrength( slice.pic->psyStrengthScale ) * pow( 2.0, dQp / 6.0 );
+  return encCfg.psyRdStrength( psyPictureScale( slice, PSY_GRAIN_BASE_STRENGTH ) ) * pow( 2.0, dQp / 6.0 );
+}
+
+double EncSlice::getPsyRdoqStrength( const VVEncCfg& encCfg, const Slice& slice )
+{
+  return encCfg.psyRdoqStrength( psyPictureScale( slice, 1.0 ) );
 }
 
 double EncSlice::xGetQPForPicture( const Slice* slice )

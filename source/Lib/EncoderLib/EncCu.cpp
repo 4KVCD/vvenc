@@ -296,6 +296,7 @@ void EncCu::initSlice( const Slice* slice )
   if( m_pcEncCfg->m_psyRdStrengthVal )
   {
     m_cRdCost.setPsyStrength( EncSlice::getPsyRdStrength( *m_pcEncCfg, *slice ) );
+    m_cTrQuant.getQuant()->setPsyRdoqStrength( EncSlice::getPsyRdoqStrength( *m_pcEncCfg, *slice ) );
   }
 }
 

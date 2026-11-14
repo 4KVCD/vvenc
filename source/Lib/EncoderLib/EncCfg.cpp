@@ -139,6 +139,11 @@ double VVEncCfg::psyRdStrength( double pictureScale ) const
   return PSY_RD_UNIT * ( m_psyRdStrengthVal * pictureScale ) / 64.0;
 }
 
+double VVEncCfg::psyRdoqStrength( double pictureScale ) const
+{
+  return PSY_RDOQ_UNIT * ( m_psyRdoqStrengthVal * pictureScale ) / 64.0;
+}
+
 void VVEncCfg::xInitCfgMembers()
 {
   m_configuredQP        = m_QP;
@@ -151,7 +156,7 @@ void VVEncCfg::xInitCfgMembers()
   m_fgaStrength         = m_fgaStrengthVal / 64.0;
   m_fgaInterval         = m_fgaIntervalLog2 >= 0 && m_fgaIntervalLog2 <= 6 ? 1 << m_fgaIntervalLog2 : m_GOPSize;
   m_psyRdStrength       = psyRdStrength( 1.0 );
-  m_psyRdoqStrength     = PSY_RDOQ_UNIT * m_psyRdoqStrengthVal / 64.0;
+  m_psyRdoqStrength     = psyRdoqStrength( 1.0 );
   m_MaxQT[0]            =
   m_MaxQT[1]            = 
   m_MaxQT[2]            = m_CTUSize;

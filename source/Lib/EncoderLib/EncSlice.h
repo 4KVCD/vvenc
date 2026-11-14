@@ -194,6 +194,7 @@ public:
   static int getCascadeQP     ( const VVEncCfg& encCfg, const GOPEntry& gopEntry, const bool isIntra, int qp, const int lumaQpBDOffset );
   static int getLowestInterQP ( const VVEncCfg& encCfg, const int baseQP );
   static double getPsyRdStrength( const VVEncCfg& encCfg, const Slice& slice );
+  static double getPsyRdoqStrength( const VVEncCfg& encCfg, const Slice& slice );
 };
 
 } // namespace vvenc
