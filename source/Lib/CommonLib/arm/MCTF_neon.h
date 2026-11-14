@@ -183,54 +183,21 @@ static inline int columnVerticalError_common( const Pel* org, const ptrdiff_t or
 }
 
 // MCTF::m_motionErrorLumaFracColumn, as motionErrorLumaFracColumn_loRes_AVX2 (MCTFX86.h): the exact errors of num
-// vectors with the same horizontal position. The horizontal pass of the union of their rows is done once into a
-// buffer, in 32 bits (exact for every 16-bit input, as the C code's int sums), then the vertical pass per vector,
-// rowOffset[i] rows lower, from samples clipped to [0, max] as motionErrorLumaFrac_loRes2D_neon does it.
+// vectors with the same horizontal position, from the rows of m_filterColumn4 (filterColumn4_neon): the vertical pass
+// per vector, rowOffset[i] rows lower (a vector reads h + 3 rows from there).
 template<typename SquareSum>
-static inline void motionErrorLumaFracColumn_loRes_common( const Pel* org, const ptrdiff_t origStride, const Pel* buf,
-                                                           const ptrdiff_t buffStride, const int w, const int h,
-                                                           const int16_t* xFilter, const int num,
+static inline void motionErrorLumaFracColumn_loRes_common( const Pel* org, const ptrdiff_t origStride, const Pel* filtered,
+                                                           const int w, const int h, const int num,
                                                            const int16_t* const* yFilter, const int* rowOffset,
                                                            const int bitDepth, int* error )
 {
-  static constexpr int MAX_SIZE = 32;   // the block size of the subpel search, MCTFUnitSize, is at most 32 (vvencCfg)
-  CHECKD( w > MAX_SIZE || h > MAX_SIZE || ( w & 7 ) != 0, "Unsupported block size" );
+  // MCTFUnitSize is at most 32 (vvencCfg); the caller passes multiples of 16, the kernel needs multiples of 8
+  CHECKD( w > 32 || h > 32 || ( w & 7 ) != 0, "Unsupported block size" );
 
-  const Pel        maxSampleValue = ( 1 << bitDepth ) - 1;
-  const int16x4_t  xf             = vld1_s16( xFilter );
-  const uint16x8_t vmax           = vdupq_n_u16( maxSampleValue );
-
-  // row r of filtered is the horizontal pass of source row r - 1; a vector needs h + 3 rows from its offset on
-  int maxOffset = 0;
+  const Pel maxSampleValue = ( 1 << bitDepth ) - 1;
   for( int i = 0; i < num; i++ )
   {
-    maxOffset = std::max( maxOffset, rowOffset[i] );
-  }
-  CHECKD( maxOffset > 1, "The vectors of a column span more than two rows" );
-  Pel filtered[( MAX_SIZE + 4 ) * MAX_SIZE];
-  for( int r = 0; r < h + 3 + maxOffset; r++ )
-  {
-    const Pel* src = buf + ( r - 1 ) * buffStride - 1;
-    for( int x = 0; x < w; x += 8 )
-    {
-      int16x8_t s[4];
-      load_s16_16x8x4( src + x, 1, s );
-      int32x4_t lo = vmull_lane_s16( vget_low_s16( s[0] ), xf, 0 );
-      int32x4_t hi = vmull_lane_s16( vget_high_s16( s[0] ), xf, 0 );
-      lo = vmlal_lane_s16( lo, vget_low_s16( s[1] ), xf, 1 );
-      hi = vmlal_lane_s16( hi, vget_high_s16( s[1] ), xf, 1 );
-      lo = vmlal_lane_s16( lo, vget_low_s16( s[2] ), xf, 2 );
-      hi = vmlal_lane_s16( hi, vget_high_s16( s[2] ), xf, 2 );
-      lo = vmlal_lane_s16( lo, vget_low_s16( s[3] ), xf, 3 );
-      hi = vmlal_lane_s16( hi, vget_high_s16( s[3] ), xf, 3 );
-      // ( sum + 32 ) >> 6, clipped to [0, max]
-      const uint16x8_t v = vminq_u16( vcombine_u16( vqrshrun_n_s32( lo, 6 ), vqrshrun_n_s32( hi, 6 ) ), vmax );
-      vst1q_s16( filtered + r * w + x, vreinterpretq_s16_u16( v ) );
-    }
-  }
-
-  for( int i = 0; i < num; i++ )
-  {
+    CHECKD( rowOffset[i] < 0 || rowOffset[i] > 1, "The vectors of a column span more than two rows" );
     const Pel* rows = filtered + rowOffset[i] * w;
     switch( selectFilterType4( yFilter[i] ) )
     {
