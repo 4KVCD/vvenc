@@ -944,6 +944,7 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
         }
       }
 
+      bool bandMeasured[QPA_MAX_NOISE_LEVELS] = {}; // a band's level stays 255 both unmeasured and at errors >= 255
       if( distFactor[0] < 3 && distFactor[1] < 3 && ( m_encCfg->m_usePerceptQPA || pic->gopEntry->m_isStartOfGop ) )
       {
         const double bd12bScale = double (m_encCfg->m_internalBitDepth[CH_L] < 12 ? 4 : 1);
@@ -958,6 +959,7 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
           sumRMS[i] = std::min (sumRMS[i], sumRMS[i + numCtu]);
           meanInCTU = bd12bScale * sumRMS[i] / blkCount[i];
           meanRmsAcrossPic += meanInCTU;
+          bandMeasured[avgIndex] = true;
           if (meanInCTU < pic->m_picShared->m_minNoiseLevels[avgIndex])
           {
             pic->m_picShared->m_minNoiseLevels[avgIndex] = uint8_t (0.5 + meanInCTU); // scaled to 12 bit, see filterAndCalculateAverageActivity()
@@ -1007,12 +1009,16 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
       if (m_encCfg->m_forceScc <= 0)
       {
         bool forceSCC = false;
-        if (pic->gopEntry->m_isStartOfGop)
+        // Screen content is forced only where the noise estimation above ran and found no noisy band. Without references
+        // at distances 1 and 2 (after a scene cut, at the end of the sequence) it does not run, and the noise levels keep
+        // their initial 255; a band whose errors are all 255 or more also keeps 255: neither means "no noise".
+        const bool noiseMeasured = distFactor[0] < 3 && distFactor[1] < 3;
+        if (pic->gopEntry->m_isStartOfGop && noiseMeasured)
         {
           forceSCC = true;
           for (int j = 0; j < QPA_MAX_NOISE_LEVELS; j++)
           {
-            if (pic->m_picShared->m_minNoiseLevels[j] < 255 && pic->m_picShared->m_minNoiseLevels[j])
+            if (bandMeasured[j] && pic->m_picShared->m_minNoiseLevels[j] > 0)
             {
               forceSCC = false;
               break;
