@@ -1,0 +1,37 @@
+# Temporary check, run only on this fork's sve-check* branches (not part of any pull request): the Arm halves of #945's
+# split MCTF column kernel (filterColumn4_neon + the NEON / SVE vertical errors) on #922 + #945. Unit test MCTF at SVE
+# and NEON, GCC 14 and clang. Every step reports and none fails the job: the log is read by hand.
+name: SVE check
+
+on:
+  push:
+    branches: [sve-check*]
+
+jobs:
+  sve:
+    name: "MCTF column kernel halves: unit test at SVE and NEON (GCC 14 and clang, ubuntu-24.04-arm)"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GCC 14
+        run: sudo apt-get update && sudo apt-get install -y g++-14 clang ninja-build
+      - name: Build (GCC 14 and clang)
+        shell: bash
+        run: |
+          lscpu | grep -i -E "model name|flags" | cut -c1-200 || true
+          cmake -S . -B b-gcc -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 > /dev/null
+          cmake --build b-gcc --target vvenc_unit_test > /dev/null || echo "gcc build failed"
+          cmake -S . -B b-clang -G Ninja -DCMAKE_BUILD_TYPE=Release -DVVENC_TOPLEVEL_OUTPUT_DIRS=OFF \
+                -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ > /dev/null
+          cmake --build b-clang --target vvenc_unit_test > /dev/null || echo "clang build failed"
+      - name: Unit test MCTF
+        shell: bash
+        run: |
+          for b in b-gcc b-clang; do
+            ut=$(find $b -name vvenc_unit_test -type f | head -1)
+            for s in SVE NEON; do
+              rc=0; $ut --SIMD=$s --testcase=MCTF --seed=1 > ut.log 2>&1 || rc=$?
+              echo "$b $s rc=$rc column tests: $(grep -c 'motionErrorLumaFracColumn' ut.log)"; grep -iE "fail|error" ut.log | head -5 || true
+            done
+          done
