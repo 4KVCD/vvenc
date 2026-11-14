@@ -178,6 +178,25 @@ public:
   // scale s0 at (h0, w0).
   static int lostGrainCapScale( int s0, bool chroma420, int h0, int w0, int h, int w );
 
+  // The grain the synthesis makes with a filter of the auto-regressive model (--fga 3): its standard deviation per unit
+  // of the scaling factor, and its power in a 16x16 block per unit of grain variance in each u + v frequency group and
+  // direction of the lost-grain fit.
+  struct ArGrain
+  {
+    double stddevPerScale = 0.0;
+    double bandPower[ LostGrainPower::GROUPS ][ LostGrainPower::DIRECTIONS ] = {};
+  };
+  // modelValues: an intensity interval's signalled model values (scaling factor, a1, 0, a3, r, a5; the filter is the same
+  // in all intervals of a component).
+  static ArGrain arGrain( const std::vector<int>& modelValues, int log2ScaleFactor, int bitDepth, bool luma );
+  // The scaling factor (0 to twice s0, the analyzer's: LOST_GRAIN_CAP_POWER in power) whose synthesized grain, rounded
+  // to whole sample values as the synthesis rounds it, added to the reconstruction, best matches the original's power
+  // per frequency group and direction (the cost of lostGrainFit), among those that leave no group from u + v = 3 more
+  // than 1.1 times above the original in amplitude. Returns the cost, -1: nothing to fit.
+  static double lostGrainFitAr( const LostGrainPower& power, const ArGrain& grain, int s0, int& scale );
+  // The largest scaling factor that fit may give: LOST_GRAIN_CAP_POWER times the power of the analyzer's s0.
+  static int lostGrainCapScaleAr( int s0 );
+
   // A plane of samples with its own storage; the analysis works on whole planes.
   struct Plane
   {
@@ -241,6 +260,7 @@ private:
   {
     double a1 = 0.0, a3 = 0.0, a5 = 0.0, r = 1.0;
     double nonDcShare = 1.0;   // share of the grain variance outside the DC coefficient of 16x16 blocks
+    double powerScale = 1.0;   // share of the measured grain power the synthesized grain gets (fitArFilter)
     bool   valid = false;
   };
   bool              m_arModel = false;
@@ -259,6 +279,7 @@ private:
   int               m_grainWeight = 1;            // variance of m_grain relative to the grain variance
   Plane             m_mask    [ MAX_NUM_COMP ];   // non-zero where the picture is not flat
   std::vector<uint8_t> m_motionFailed[ MAX_NUM_COMP ];   // per 16x16 block: the temporal residual's compensation failed
+  std::vector<double> m_fineEnergy[ MAX_NUM_COMP ];   // per 16x16 block: the original's energy at the finest frequencies
   std::vector<double> m_repeatedGrainRatio[ MAX_NUM_COMP ];   // per intensity bin: grain variance per variance the residual sees
   std::vector<int>  m_plateaus;   // luma values of the picture's grain-free plateaus (findPlateaus), most blocks first
 
@@ -279,7 +300,9 @@ private:
   void findMask              ( ComponentID compId );
   void maskForScale          ( const Plane& picture, Plane& mask, int bitDepth, int numDilations );
   bool markMotionFailures    ( ComponentID compId );
+  void measureFineDetail     ( ComponentID compId, const Plane& spatialGrain );
   void measureRepeatedGrain  ( ComponentID compId );
+  void addSmoothBlockPoints  ( ComponentID compId, std::vector<int>& means, std::vector<int>& strengths ) const;
 
   // parameter estimation
   void estimateComponent     ( ComponentID compId );
@@ -296,6 +319,7 @@ private:
 
   void getVtmParameters      ( double strength, int& log2ScaleFactor, SeiFgc::CompModel compModel[ MAX_NUM_COMP ] ) const;
   void getArParameters       ( double strength, int& log2ScaleFactor, SeiFgc::CompModel compModel[ MAX_NUM_COMP ] ) const;
+  bool arParametersAt        ( double strength, int log2ScaleFactor, SeiFgc::CompModel compModel[ MAX_NUM_COMP ], bool& usable ) const;
   void fitArFilter           ( ComponentID compId );
 
   void estimateCutoffFreq    ( ComponentID compId, int bitDepth );
