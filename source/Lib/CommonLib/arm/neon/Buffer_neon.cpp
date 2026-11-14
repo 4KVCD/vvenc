@@ -1431,8 +1431,7 @@ static uint64_t sumSquaredError_neon( const Pel* src0, const ptrdiff_t stride0, 
   return sumSquaredError_common<SquareSumNeon>( src0, stride0, src1, stride1, width, height );
 }
 
-// adds the squared differences of eight samples to accLo (the first four) and accHi (the last four): two accumulators,
-// so that consecutive calls do not wait for each other
+// adds the squared differences of eight samples: the first four to accLo, the last four to accHi
 static inline void addSquaredDiffs8( int32x4_t& accLo, int32x4_t& accHi, const Pel* src0, const Pel* src1 )
 {
   const int16x8_t a    = vld1q_s16( src0 );
@@ -1442,116 +1441,191 @@ static inline void addSquaredDiffs8( int32x4_t& accLo, int32x4_t& accHi, const P
   accHi = vmlal_s16( accHi, vget_high_s16( diff ), vget_high_s16( diff ) );
 }
 
-// The sums of squared errors of the numX x numY parts of lengthX x lengthY samples (Buffer.h). From width 16 on, the four
-// parts of a row of parts are summed in a vector each; the widths up to 8 sum each column first, then the columns of a
-// part. A lane adds at most 64 squares of 12-bit differences (2^30), and a part's sum fits 32 bits, so the lanes and the
-// unsigned additions of the part sums are exact.
-static void sumSquaredErrorParts_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1, const int lengthX, const int lengthY, const int numX, const int numY, uint32_t sums[][4] )
+// the four part sums of a row of parts of width 32 or 64 from a low and a high accumulator per part
+static inline uint32x4_t partSumsLoHi( const int32x4_t accLo0, const int32x4_t accHi0, const int32x4_t accLo1,
+                                       const int32x4_t accHi1, const int32x4_t accLo2, const int32x4_t accHi2,
+                                       const int32x4_t accLo3, const int32x4_t accHi3 )
 {
-  const int width = lengthX * numX;
-  CHECKD( width > 8 && numX != 4, "only four parts in a row from width 16 up" );
-  CHECKD( width <= 8 && lengthX > 4, "parts of the widths up to 8 are 2 or 4 wide" );
+  const int32x4_t acc0 = vaddq_s32( accLo0, accHi0 );
+  const int32x4_t acc1 = vaddq_s32( accLo1, accHi1 );
+  const int32x4_t acc2 = vaddq_s32( accLo2, accHi2 );
+  const int32x4_t acc3 = vaddq_s32( accLo3, accHi3 );
+  return horizontal_add_4d_u32x4( vreinterpretq_u32_s32( acc0 ), vreinterpretq_u32_s32( acc1 ),
+                                  vreinterpretq_u32_s32( acc2 ), vreinterpretq_u32_s32( acc3 ) );
+}
+
+// the part sums of a row of parts of width 8 or less from its column sums (columns 0-3 in accLo, 4-7 in accHi, the
+// lanes past the width 0): the parts of 2 columns are the pair sums, those of 4 two of them
+static inline uint32x4_t partSumsOfColumns( const int32x4_t accLo, const int32x4_t accHi, const int lengthX )
+{
+  int32x4_t pairs = pairwise_add_s32x4( accLo, accHi );
+  if( lengthX == 4 )
+  {
+    pairs = pairwise_add_s32x4( pairs, pairs );
+  }
+  return vreinterpretq_u32_s32( pairs );
+}
+
+// width 64: four parts of 16 columns (two vectors each)
+static void sumSquaredErrorParts64_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1,
+                                         const int lengthY, const int numY, uint32_t sums[][4] )
+{
   for( int j = 0; j < numY; j++, src0 += lengthY * stride0, src1 += lengthY * stride1 )
   {
     const Pel* row0 = src0;
     const Pel* row1 = src1;
-    uint32x4_t parts;
-    if( width == 16 )
+    int32x4_t accLo0 = vdupq_n_s32( 0 ), accHi0 = vdupq_n_s32( 0 );
+    int32x4_t accLo1 = vdupq_n_s32( 0 ), accHi1 = vdupq_n_s32( 0 );
+    int32x4_t accLo2 = vdupq_n_s32( 0 ), accHi2 = vdupq_n_s32( 0 );
+    int32x4_t accLo3 = vdupq_n_s32( 0 ), accHi3 = vdupq_n_s32( 0 );
+    for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
     {
-      // parts of 4: the halves of each vector of 8, one accumulator per part
-      int32x4_t acc0 = vdupq_n_s32( 0 );
-      int32x4_t acc1 = vdupq_n_s32( 0 );
-      int32x4_t acc2 = vdupq_n_s32( 0 );
-      int32x4_t acc3 = vdupq_n_s32( 0 );
-      for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
-      {
-        addSquaredDiffs8( acc0, acc1, row0, row1 );
-        addSquaredDiffs8( acc2, acc3, row0 + 8, row1 + 8 );
-      }
-      parts = horizontal_add_4d_u32x4( vreinterpretq_u32_s32( acc0 ), vreinterpretq_u32_s32( acc1 ),
-                                       vreinterpretq_u32_s32( acc2 ), vreinterpretq_u32_s32( acc3 ) );
+      addSquaredDiffs8( accLo0, accHi0, row0, row1 );
+      addSquaredDiffs8( accLo1, accHi1, row0 + 16, row1 + 16 );
+      addSquaredDiffs8( accLo2, accHi2, row0 + 32, row1 + 32 );
+      addSquaredDiffs8( accLo3, accHi3, row0 + 48, row1 + 48 );
+      addSquaredDiffs8( accLo0, accHi0, row0 + 8, row1 + 8 );
+      addSquaredDiffs8( accLo1, accHi1, row0 + 24, row1 + 24 );
+      addSquaredDiffs8( accLo2, accHi2, row0 + 40, row1 + 40 );
+      addSquaredDiffs8( accLo3, accHi3, row0 + 56, row1 + 56 );
     }
-    else if( width >= 32 )
+    vst1q_u32( sums[j], partSumsLoHi( accLo0, accHi0, accLo1, accHi1, accLo2, accHi2, accLo3, accHi3 ) );
+  }
+}
+
+// width 32: four parts of 8 columns (a vector each)
+static void sumSquaredErrorParts32_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1,
+                                         const int lengthY, const int numY, uint32_t sums[][4] )
+{
+  for( int j = 0; j < numY; j++, src0 += lengthY * stride0, src1 += lengthY * stride1 )
+  {
+    const Pel* row0 = src0;
+    const Pel* row1 = src1;
+    int32x4_t accLo0 = vdupq_n_s32( 0 ), accHi0 = vdupq_n_s32( 0 );
+    int32x4_t accLo1 = vdupq_n_s32( 0 ), accHi1 = vdupq_n_s32( 0 );
+    int32x4_t accLo2 = vdupq_n_s32( 0 ), accHi2 = vdupq_n_s32( 0 );
+    int32x4_t accLo3 = vdupq_n_s32( 0 ), accHi3 = vdupq_n_s32( 0 );
+    for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
     {
-      // parts of 8 (a vector each) or 16 (two vectors each), with a low and a high accumulator per part
-      int32x4_t accLo0 = vdupq_n_s32( 0 ), accHi0 = vdupq_n_s32( 0 );
-      int32x4_t accLo1 = vdupq_n_s32( 0 ), accHi1 = vdupq_n_s32( 0 );
-      int32x4_t accLo2 = vdupq_n_s32( 0 ), accHi2 = vdupq_n_s32( 0 );
-      int32x4_t accLo3 = vdupq_n_s32( 0 ), accHi3 = vdupq_n_s32( 0 );
-      if( width == 32 )
-      {
-        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
-        {
-          addSquaredDiffs8( accLo0, accHi0, row0, row1 );
-          addSquaredDiffs8( accLo1, accHi1, row0 + 8, row1 + 8 );
-          addSquaredDiffs8( accLo2, accHi2, row0 + 16, row1 + 16 );
-          addSquaredDiffs8( accLo3, accHi3, row0 + 24, row1 + 24 );
-        }
-      }
-      else
-      {
-        CHECKD( width != 64, "widths from 16 up are 16, 32 or 64" );
-        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
-        {
-          addSquaredDiffs8( accLo0, accHi0, row0, row1 );
-          addSquaredDiffs8( accLo1, accHi1, row0 + 16, row1 + 16 );
-          addSquaredDiffs8( accLo2, accHi2, row0 + 32, row1 + 32 );
-          addSquaredDiffs8( accLo3, accHi3, row0 + 48, row1 + 48 );
-          addSquaredDiffs8( accLo0, accHi0, row0 + 8, row1 + 8 );
-          addSquaredDiffs8( accLo1, accHi1, row0 + 24, row1 + 24 );
-          addSquaredDiffs8( accLo2, accHi2, row0 + 40, row1 + 40 );
-          addSquaredDiffs8( accLo3, accHi3, row0 + 56, row1 + 56 );
-        }
-      }
-      const int32x4_t acc0 = vaddq_s32( accLo0, accHi0 );
-      const int32x4_t acc1 = vaddq_s32( accLo1, accHi1 );
-      const int32x4_t acc2 = vaddq_s32( accLo2, accHi2 );
-      const int32x4_t acc3 = vaddq_s32( accLo3, accHi3 );
-      parts = horizontal_add_4d_u32x4( vreinterpretq_u32_s32( acc0 ), vreinterpretq_u32_s32( acc1 ),
-                                       vreinterpretq_u32_s32( acc2 ), vreinterpretq_u32_s32( acc3 ) );
+      addSquaredDiffs8( accLo0, accHi0, row0, row1 );
+      addSquaredDiffs8( accLo1, accHi1, row0 + 8, row1 + 8 );
+      addSquaredDiffs8( accLo2, accHi2, row0 + 16, row1 + 16 );
+      addSquaredDiffs8( accLo3, accHi3, row0 + 24, row1 + 24 );
     }
-    else
+    vst1q_u32( sums[j], partSumsLoHi( accLo0, accHi0, accLo1, accHi1, accLo2, accHi2, accLo3, accHi3 ) );
+  }
+}
+
+// width 16: four parts of 4 columns, the halves of each vector of 8, one accumulator per part
+static void sumSquaredErrorParts16_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1,
+                                         const int lengthY, const int numY, uint32_t sums[][4] )
+{
+  for( int j = 0; j < numY; j++, src0 += lengthY * stride0, src1 += lengthY * stride1 )
+  {
+    const Pel* row0 = src0;
+    const Pel* row1 = src1;
+    int32x4_t acc0 = vdupq_n_s32( 0 );
+    int32x4_t acc1 = vdupq_n_s32( 0 );
+    int32x4_t acc2 = vdupq_n_s32( 0 );
+    int32x4_t acc3 = vdupq_n_s32( 0 );
+    for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
     {
-      // per column: columns 0-3 in accLo, 4-7 in accHi; the lanes past the width stay 0
-      int32x4_t accLo = vdupq_n_s32( 0 );
-      int32x4_t accHi = vdupq_n_s32( 0 );
-      if( width == 8 )
-      {
-        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
-        {
-          addSquaredDiffs8( accLo, accHi, row0, row1 );
-        }
-      }
-      else if( width == 4 )
-      {
-        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
-        {
-          const int16x4_t a    = vld1_s16( row0 );
-          const int16x4_t b    = vld1_s16( row1 );
-          const int16x4_t diff = vsub_s16( a, b );
-          accLo = vmlal_s16( accLo, diff, diff );
-        }
-      }
-      else
-      {
-        CHECKD( width != 2, "widths up to 8 are 2, 4 or 8" );
-        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
-        {
-          const int16x4_t a    = load_s16x2( row0 );
-          const int16x4_t b    = load_s16x2( row1 );
-          const int16x4_t diff = vsub_s16( a, b );
-          accLo = vmlal_s16( accLo, diff, diff );
-        }
-      }
-      // the parts of 2 columns are the pair sums, those of 4 two of them
-      int32x4_t pairs = pairwise_add_s32x4( accLo, accHi );
-      if( lengthX == 4 )
-      {
-        pairs = pairwise_add_s32x4( pairs, pairs );
-      }
-      parts = vreinterpretq_u32_s32( pairs );
+      addSquaredDiffs8( acc0, acc1, row0, row1 );
+      addSquaredDiffs8( acc2, acc3, row0 + 8, row1 + 8 );
     }
-    vst1q_u32( sums[j], parts );
+    vst1q_u32( sums[j], horizontal_add_4d_u32x4( vreinterpretq_u32_s32( acc0 ), vreinterpretq_u32_s32( acc1 ),
+                                                 vreinterpretq_u32_s32( acc2 ), vreinterpretq_u32_s32( acc3 ) ) );
+  }
+}
+
+// width 8: the sum of each column first, then the columns of each part
+static void sumSquaredErrorParts8_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1,
+                                        const int lengthX, const int lengthY, const int numY, uint32_t sums[][4] )
+{
+  for( int j = 0; j < numY; j++, src0 += lengthY * stride0, src1 += lengthY * stride1 )
+  {
+    const Pel* row0 = src0;
+    const Pel* row1 = src1;
+    int32x4_t accLo = vdupq_n_s32( 0 );
+    int32x4_t accHi = vdupq_n_s32( 0 );
+    for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+    {
+      addSquaredDiffs8( accLo, accHi, row0, row1 );
+    }
+    vst1q_u32( sums[j], partSumsOfColumns( accLo, accHi, lengthX ) );
+  }
+}
+
+// width 4: the sum of each column first, then the columns of each part
+static void sumSquaredErrorParts4_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1,
+                                        const int lengthX, const int lengthY, const int numY, uint32_t sums[][4] )
+{
+  for( int j = 0; j < numY; j++, src0 += lengthY * stride0, src1 += lengthY * stride1 )
+  {
+    const Pel* row0 = src0;
+    const Pel* row1 = src1;
+    int32x4_t acc = vdupq_n_s32( 0 );
+    for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+    {
+      const int16x4_t a    = vld1_s16( row0 );
+      const int16x4_t b    = vld1_s16( row1 );
+      const int16x4_t diff = vsub_s16( a, b );
+      acc = vmlal_s16( acc, diff, diff );
+    }
+    vst1q_u32( sums[j], partSumsOfColumns( acc, vdupq_n_s32( 0 ), lengthX ) );
+  }
+}
+
+// width 2: the sum of each column first, then the columns of each part
+static void sumSquaredErrorParts2_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1,
+                                        const int lengthX, const int lengthY, const int numY, uint32_t sums[][4] )
+{
+  for( int j = 0; j < numY; j++, src0 += lengthY * stride0, src1 += lengthY * stride1 )
+  {
+    const Pel* row0 = src0;
+    const Pel* row1 = src1;
+    int32x4_t acc = vdupq_n_s32( 0 );
+    for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+    {
+      const int16x4_t a    = load_s16x2( row0 );
+      const int16x4_t b    = load_s16x2( row1 );
+      const int16x4_t diff = vsub_s16( a, b );
+      acc = vmlal_s16( acc, diff, diff );
+    }
+    vst1q_u32( sums[j], partSumsOfColumns( acc, vdupq_n_s32( 0 ), lengthX ) );
+  }
+}
+
+// The sums of squared errors of the numX x numY parts of lengthX x lengthY samples (Buffer.h: parts of up to 16 x 16
+// samples of up to 12 bits). A lane adds at most 64 squares of 12-bit differences (below 2^30) and a part's sum is below
+// 2^32, so the lanes and the final unsigned additions are exact.
+static void sumSquaredErrorParts_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1, const int lengthX, const int lengthY, const int numX, const int numY, uint32_t sums[][4] )
+{
+  const int width = lengthX * numX;
+  CHECKD( lengthX > 16 || lengthY > 16, "parts of up to 16 x 16 samples" );
+  CHECKD( width > 8 && numX != 4, "only four parts in a row from width 16 up" );
+  CHECKD( width <= 8 && lengthX > 4, "parts of the widths up to 8 are 2 or 4 wide" );
+  switch( width )
+  {
+  case 64:
+    sumSquaredErrorParts64_neon( src0, stride0, src1, stride1, lengthY, numY, sums );
+    break;
+  case 32:
+    sumSquaredErrorParts32_neon( src0, stride0, src1, stride1, lengthY, numY, sums );
+    break;
+  case 16:
+    sumSquaredErrorParts16_neon( src0, stride0, src1, stride1, lengthY, numY, sums );
+    break;
+  case 8:
+    sumSquaredErrorParts8_neon( src0, stride0, src1, stride1, lengthX, lengthY, numY, sums );
+    break;
+  case 4:
+    sumSquaredErrorParts4_neon( src0, stride0, src1, stride1, lengthX, lengthY, numY, sums );
+    break;
+  default:
+    CHECKD( width != 2, "the widths are 2 to 64" );
+    sumSquaredErrorParts2_neon( src0, stride0, src1, stride1, lengthX, lengthY, numY, sums );
+    break;
   }
 }
 
