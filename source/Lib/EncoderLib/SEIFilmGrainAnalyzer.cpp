@@ -83,10 +83,21 @@ constexpr int    MAX_ALLOWED_MODEL_VALUES  = 3;
 constexpr int    MAX_NUM_INTENSITIES       = 256;
 constexpr int    MAX_CUTOFF_PAIRS          = 10;    // different cut-off pairs the synthesis supports per picture
 constexpr double MIN_BLOCK_WEIGHT          = 1.0;   // accumulated block weight an interval needs for cut-off estimation
-// A luma value with at least PLATEAU_MIN_BLOCKS constant 16x16 blocks of the original is a grain-free plateau (a clipped
-// highlight, or an area the source's own coding flattened: grain never leaves a 16x16 block constant); the MAX_PLATEAUS
-// values with the most such blocks get a hole.
+// A luma value is a grain-free plateau (a clipped highlight, a blown-out sky) when the original has constant 16x16
+// blocks of it (grain never leaves a block constant) and
+// - they form an area: at least PLATEAU_MIN_BLOCKS of them, and at least PLATEAU_JOINED_NUM / PLATEAU_JOINED_DEN of all
+//   of them, have a constant block of the same value beside, above or below, and
+// - the value is the picture's ceiling: at most one block in PLATEAU_CEILING_BLOCKS is brighter than the plateau's hole.
+// A lossy source also has constant blocks where its own coding flattened single blocks of a grainy area, at any level
+// and scattered; they are no plateau, and a hole there would take the grain of the grainy blocks around them
+// (gangster_chase, H.264: 19 and 20 such blocks among 1400 grainy ones at their levels, 9 to 24 % of the picture
+// brighter, 4 and 9 of them joined; bk_1191's clipped highlight and Top Gun's sky: none brighter, 93 to 100 % joined). The
+// MAX_PLATEAUS values with the most constant blocks get a hole. A highlight too small to hold two 16x16 blocks side by
+// side is not found.
 constexpr int    PLATEAU_MIN_BLOCKS        = 8;
+constexpr int    PLATEAU_JOINED_NUM        = 3;
+constexpr int    PLATEAU_JOINED_DEN        = 4;
+constexpr int    PLATEAU_CEILING_BLOCKS    = 200;
 constexpr int    MAX_PLATEAUS              = 2;
 constexpr int    PLATEAU_MIN_INTENSITY     = 18;    // at 8 bits: the hole v8 - 1 .. v8 + 1 stays above digital black (16)
 
@@ -418,35 +429,81 @@ static bool isFlatBlock( const FgaRowKernels& k, const Plane& mask, const Plane&
   return 2 * stats.stddev < ( maxStrength >> 1 );
 }
 
-// The grain-free plateaus of a luma picture: the values (from PLATEAU_MIN_INTENSITY at 8 bits) with at least
-// PLATEAU_MIN_BLOCKS constant 16x16 blocks, at most MAX_PLATEAUS, most blocks first (ties: the lower value). A block is
-// constant when its 256 samples are equal, i.e. 256 * sumSq == sum^2.
-static std::vector<int> findPlateaus( const FgaRowKernels& k, const CPelBuf& luma, int bitDepth )
+// The 16x16 blocks of a luma picture (whole blocks only, raster order, `columns` per row): per block its value when its
+// 256 samples are equal (256 * sumSq == sum^2), else -1; per 8-bit mean the number of blocks.
+static std::vector<int> constantBlockValues( const FgaRowKernels& k, const CPelBuf& luma, int bitDepth, int& columns,
+                                             std::vector<int>& blocksAtLevel )
 {
   constexpr int N = 16;
-  std::vector<int> constantBlocks( size_t( 1 ) << bitDepth, 0 );   // per value
+  columns = (int) luma.width / N;
+  blocksAtLevel.assign( MAX_NUM_INTENSITIES, 0 );
+  std::vector<int> values;
+  values.reserve( size_t( columns ) * ( luma.height / N ) );
   for( int y = 0; y + N <= (int) luma.height; y += N )
   {
     for( int x = 0; x + N <= (int) luma.width; x += N )
     {
       int64_t sum = 0, sumSq = 0;
       k.blockSums( luma.bufAt( x, y ), luma.stride, sum, sumSq );
-      const int value = (int) ( sum / ( N * N ) );
-      if( N * N * sumSq == sum * sum && value >= ( PLATEAU_MIN_INTENSITY << ( bitDepth - BIT_DEPTH_8 ) ) )
-      {
-        constantBlocks[ value ]++;
-      }
+      const int mean = (int) ( sum / ( N * N ) );
+      blocksAtLevel[ mean >> ( bitDepth - BIT_DEPTH_8 ) ]++;
+      values.push_back( N * N * sumSq == sum * sum ? mean : -1 );
     }
   }
+  return values;
+}
+
+// The grain-free plateaus of a luma picture (see PLATEAU_MIN_BLOCKS): the qualifying values, at most MAX_PLATEAUS, most
+// constant blocks first (ties: the lower value).
+static std::vector<int> findPlateaus( const FgaRowKernels& k, const CPelBuf& luma, int bitDepth )
+{
+  int columns = 0;
+  std::vector<int> blocksAtLevel;
+  const std::vector<int> values = constantBlockValues( k, luma, bitDepth, columns, blocksAtLevel );
+  const int numBlocks = (int) values.size(), shift = bitDepth - BIT_DEPTH_8;
+
+  // per value: its constant blocks, and those of them with a constant block of the same value beside, above or below
+  std::vector<int> constantBlocks( size_t( 1 ) << bitDepth, 0 ), joinedBlocks( size_t( 1 ) << bitDepth, 0 );
+  for( int i = 0; i < numBlocks; i++ )
+  {
+    const int value = values[ i ];
+    if( value < ( PLATEAU_MIN_INTENSITY << shift ) )
+    {
+      continue;   // not constant (-1), or too dark
+    }
+    const int  column = i % columns;
+    const bool joined = ( column > 0 && values[ i - 1 ] == value ) || ( column + 1 < columns && values[ i + 1 ] == value )
+                     || ( i >= columns && values[ i - columns ] == value )
+                     || ( i + columns < numBlocks && values[ i + columns ] == value );
+    constantBlocks[ value ]++;
+    joinedBlocks  [ value ] += joined;
+  }
+
+  const auto isPlateau = [ & ]( int value, int numConstant )
+  {
+    int brighter = 0;   // blocks above the hole, which is ( value >> shift ) - 1 .. + 1 (cutPlateauHoles)
+    for( int level = ( value >> shift ) + 2; level < MAX_NUM_INTENSITIES; level++ )
+    {
+      brighter += blocksAtLevel[ level ];
+    }
+    return joinedBlocks[ value ] >= PLATEAU_MIN_BLOCKS
+        && joinedBlocks[ value ] * PLATEAU_JOINED_DEN >= numConstant * PLATEAU_JOINED_NUM
+        && brighter * PLATEAU_CEILING_BLOCKS <= numBlocks;
+  };
+
   std::vector<int> plateaus;
-  for( int i = 0; i < MAX_PLATEAUS; i++ )
+  while( (int) plateaus.size() < MAX_PLATEAUS )
   {
     const auto most = std::max_element( constantBlocks.begin(), constantBlocks.end() );
     if( *most < PLATEAU_MIN_BLOCKS )
     {
       break;
     }
-    plateaus.push_back( (int) ( most - constantBlocks.begin() ) );
+    const int value = (int) ( most - constantBlocks.begin() );
+    if( isPlateau( value, *most ) )
+    {
+      plateaus.push_back( value );
+    }
     *most = 0;
   }
   return plateaus;
@@ -1131,7 +1188,11 @@ void FGAnalyzer::estimateGrainParameters( const CPelUnitBuf& orig, const CPelUni
 {
   const int numComp = getNumberValidComponents( m_chromaFormat );
   m_grainWeight = residual ? residualWeight : 1;
-  m_plateaus = m_doAnalysis[ COMP_Y ] ? findPlateaus( m_kernels, orig.get( COMP_Y ), m_bitDepths[ CH_L ] ) : std::vector<int>();
+  m_plateaus.clear();
+  if( m_improved && m_doAnalysis[ COMP_Y ] )   // --fga 1 stays the VTM analysis
+  {
+    m_plateaus = findPlateaus( m_kernels, orig.get( COMP_Y ), m_bitDepths[ CH_L ] );
+  }
   for( int c = 0; c < numComp; c++ )
   {
     const ComponentID compId = ComponentID( c );
