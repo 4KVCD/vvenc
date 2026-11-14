@@ -267,6 +267,7 @@ private:
   int       m_ctuSize          { MAX_CU_SIZE };
   bool      m_isNonBlocking    { false };
   bool      m_flush            { false };
+  EncStage* m_startStage       { nullptr };
 
 protected:
   int       m_picCount         { 0 };
@@ -287,9 +288,18 @@ protected:
   // Whether the stage holds the pictures it needs to process: minQueueSize pictures; stages may override
   virtual bool hasEnoughPictures( const PicList& picList ) const { return (int)picList.size() >= m_minQueueSize; }
 
+  // Called by a stage before it waits for its own pool tasks (see setStartStage).
+  void pollStartStage() const { if( m_startStage ) m_startStage->startReadyPictures(); }
+
 public:
   // Waits until a picture in coding is finished; returns false at once when no picture is in coding.
   virtual bool waitForFreeEncoders() { return false; }
+  virtual void startReadyPictures() {}
+
+  // Pictures start only on the main thread, in the last stage. While the main thread runs an earlier stage, that stage
+  // lets the last one start ready pictures (startReadyPictures, without waiting) each time it waits for its own pool
+  // tasks, so a picture encoder freed meanwhile does not stay idle.
+  void setStartStage( EncStage* startStage ) { m_startStage = startStage; }
 
   void freePicList()
   {

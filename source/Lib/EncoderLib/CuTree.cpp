@@ -550,6 +550,7 @@ void CuTree::xForEachRow( int numRows, const std::function<void( int )>& fn ) co
     }, new std::shared_ptr<CuTreeRows>( rows ) );
   }
   rows->work();
+  pollStartStage();
   rows->waitAllDone(); // for the rows helpers took and still run
 }
 
@@ -653,6 +654,7 @@ void CuTree::processPictures( const PicList& picList, AccessUnitList& auList, Pi
     {
       continue;
     }
+    pollStartStage();
     xAnalyse( *frame, pic, flush );
 
     // In a hierarchical GOP the top temporal layer is never referenced, its pictures are not needed any more.
