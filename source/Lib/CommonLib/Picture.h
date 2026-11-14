@@ -151,6 +151,10 @@ struct Picture : public UnitArea
   // psy-rd: the source's luma texture energies of the 8x8 [0] and 4x4 [1] blocks at every 4-sample grid position
   // (psyGridW per row), built by RdCost::buildPsyOrgEnergies before the picture's CTUs are coded; empty when psy is off
   std::vector<int32_t> psyOrgEnergy[2];
+  // psy-rd: the source's group sums (RdCost.h: PSY_NUM_GROUPS per position) of the 8x8 block at every 4-sample grid position
+  std::vector<int32_t> psyOrgGroups;
+  // the same of the 4x4 block (PSY_NUM_GROUPS_4x4 per position)
+  std::vector<int32_t> psyOrgGroups4x4;
   int                  psyGridW = 0;
   // psy-rd: 1 at a 4-sample grid position (psyGridW per row) whose 16x16 tile lies within 16 samples of a source edge
   // (RdCost::buildPsyEdgeGate); empty when psy is off

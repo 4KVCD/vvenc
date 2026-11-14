@@ -4404,18 +4404,19 @@ static bool check_psyBand( RdCost* ref, RdCost* opt, int n, unsigned num_cases )
   return passed;
 }
 
-// the same kernels of a + b (prediction + residual), the sum taken as Pel: 10-bit predictions with residuals of 11 bits
-// (the usual range) and of 16 bits (sums outside int16 must wrap as the C version's Pel sum does)
-static bool check_psyBandSum( RdCost* ref, RdCost* opt, int n, unsigned num_cases )
+// psy-rd's group sums of an 8x8 block: a 10-bit block alone, with an 11-bit signed residual, and with any 16-bit second
+// block (the sum then wraps as Pel in every version)
+static bool check_psyGroupSums( RdCost* ref, RdCost* opt, int n, unsigned num_cases )
 {
-  const std::string name = n == 8 ? "RdCost::m_psyBand8x8Sum" : "RdCost::m_psyBand4x4Sum";
+  const std::string name      = n == 8 ? "RdCost::m_psyGroupSums8x8" : "RdCost::m_psyGroupSums4x4";
+  const int         numGroups = n == 8 ? PSY_NUM_GROUPS : PSY_NUM_GROUPS_4x4;
+  const auto        refFunc   = n == 8 ? ref->m_psyGroupSums8x8 : ref->m_psyGroupSums4x4;
+  const auto        optFunc   = n == 8 ? opt->m_psyGroupSums8x8 : opt->m_psyGroupSums4x4;
   printf( "Testing %s\n", name.c_str() );
-  auto kernel = [n]( RdCost* rdCost ) { return n == 8 ? rdCost->m_psyBand8x8Sum : rdCost->m_psyBand4x4Sum; };
 
   DimensionGenerator rng;
   InputGenerator<Pel> g10{ 10, /*is_signed=*/false };
   InputGenerator<Pel> g11{ 11, /*is_signed=*/true };
-  auto                any16 = []() { return Pel( ( rand() << 8 ) ^ rand() ); };
 
   bool passed = true;
   for( unsigned i = 0; i < num_cases; i++ )
@@ -4423,16 +4424,22 @@ static bool check_psyBandSum( RdCost* ref, RdCost* opt, int n, unsigned num_case
     const int        strideA = rng.get( n, 64 ), strideB = rng.get( n, 64 );
     std::vector<Pel> a( strideA * n ), b( strideB * n );
     std::generate( a.begin(), a.end(), g10 );
-    if( i & 1 )
+    if( i % 3 == 2 )
     {
-      std::generate( b.begin(), b.end(), any16 );
+      std::generate( b.begin(), b.end(), []() { return Pel( ( rand() << 8 ) ^ rand() ); } );
     }
     else
     {
       std::generate( b.begin(), b.end(), g11 );
     }
-    passed = compare_value( name, kernel( ref )( a.data(), strideA, b.data(), strideB ),
-                                  kernel( opt )( a.data(), strideA, b.data(), strideB ) ) && passed;
+    const Pel* bPtr = ( i % 3 ) ? b.data() : nullptr;
+    int64_t    sumsRef[PSY_NUM_GROUPS], sumsOpt[PSY_NUM_GROUPS];
+    refFunc( a.data(), strideA, bPtr, strideB, sumsRef );
+    optFunc( a.data(), strideA, bPtr, strideB, sumsOpt );
+    for( int g = 0; g < numGroups; g++ )
+    {
+      passed = compare_value( name, sumsRef[g], sumsOpt[g] ) && passed;
+    }
   }
   return passed;
 }
@@ -4449,8 +4456,8 @@ static bool test_RdCost()
   passed = check_bvBitsLineIBC( &ref, &opt, 10 * num_cases ) && passed;
   for( int n : { 8, 4 } )
   {
+    passed = check_psyGroupSums( &ref, &opt, n, 10 * num_cases ) && passed;
     passed = check_psyBand( &ref, &opt, n, 10 * num_cases ) && passed;
-    passed = check_psyBandSum( &ref, &opt, n, 10 * num_cases ) && passed;
   }
   std::array<int, 8> widths = { 1, 2, 4, 8, 16, 32, 64, 128 };
   std::array<int, 7> heights = { 2, 4, 8, 16, 32, 64, 128 };

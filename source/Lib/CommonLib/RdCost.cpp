@@ -81,16 +81,9 @@ void RdCost::setLambda( double dLambda, const BitDepths &bitDepths )
 }
 
 
-// the L1 norm of an n x n block's unnormalized Walsh-Hadamard transform over its psy band: for n = 8 / 4 the fine band
-// PSY_BAND_8x8 / _4x4 (RdCost.h), for n = 1 / 2 (ISP sub-partitions, too small for a band) every AC coefficient. The
-// transform is linear and maps a constant block to its DC coefficient alone, which no band holds, so no mean needs to be
-// removed.
-int64_t RdCost::xPsyBandL1( const Pel* src, ptrdiff_t stride, int n )
+// in place: the unnormalized Walsh-Hadamard transform of an n x n block (natural order)
+static void psyHadamard( int* blk, int n )
 {
-  int blk[64];
-  for( int y = 0; y < n; y++ )
-    for( int x = 0; x < n; x++ )
-      blk[y * n + x] = src[y * stride + x];
   for( int len = 1; len < n; len <<= 1 )   // along the rows
     for( int y = 0; y < n; y++ )
       for( int x = 0; x < n; x += 2 * len )
@@ -107,6 +100,108 @@ int64_t RdCost::xPsyBandL1( const Pel* src, ptrdiff_t stride, int n )
           const int a = blk[k * n + x], b = blk[( k + len ) * n + x];
           blk[k * n + x] = a + b; blk[( k + len ) * n + x] = a - b;
         }
+}
+
+// the transforms of the n x n source block and of the reconstruction rec + resi (resi may be null; unclipped)
+static void psyTransformPair( const Pel* org, ptrdiff_t orgStride, const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, int n, int* o, int* r )
+{
+  for( int y = 0; y < n; y++ )
+    for( int x = 0; x < n; x++ )
+    {
+      o[y * n + x] = org[y * orgStride + x];
+      r[y * n + x] = rec[y * recStride + x] + ( resi ? resi[y * resiStride + x] : 0 );
+    }
+  psyHadamard( o, n );
+  psyHadamard( r, n );
+}
+
+// per group of masks: the L1 of the transform coefficients of the n x n block a, or a + b summed as Pel when b is given
+static void psyGroupSums( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int n, const PsyGroupMasks& masks, int numGroups, int64_t* sums )
+{
+  int blk[64];
+  for( int y = 0; y < n; y++ )
+    for( int x = 0; x < n; x++ )
+    {
+      blk[y * n + x] = b ? Pel( a[y * aStride + x] + b[y * bStride + x] ) : a[y * aStride + x];
+    }
+  psyHadamard( blk, n );
+  for( int g = 0; g < numGroups; g++ )
+  {
+    sums[g] = 0;
+    for( int i = 0; i < n * n; i++ )
+    {
+      sums[g] += std::abs( blk[i] ) & masks.keep[g][i];
+    }
+  }
+}
+
+void RdCost::xPsyGroupSums8x8( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS] )
+{
+  psyGroupSums( a, aStride, b, bStride, 8, PSY_GROUPS_8x8, PSY_NUM_GROUPS, sums );
+}
+
+void RdCost::xPsyGroupSums4x4( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS_4x4] )
+{
+  psyGroupSums( a, aStride, b, bStride, 4, PSY_GROUPS_4x4, PSY_NUM_GROUPS_4x4, sums );
+}
+
+// One 8x8 or 4x4 block of the psy difference from ONE transform of the reconstruction (rec, or rec + resi): recL1 is its
+// band L1 (the group sums add up to it: what m_psyBand8x8 / m_psyBand4x4 return), and groupDiff the
+// grouped band difference to the source: the sum over the groups of | source's group L1 - credit x reconstruction's
+// group L1 | (see PSY_GROUPS_8x8). The source's group sums come from the picture's table (computed here for a position
+// off the grid or without a table).
+void RdCost::xPsyBlock( const Picture& pic, const CPelBuf& org, int x, int y, int xInArea, int yInArea, int n, const CPelBuf& rec, const CPelBuf& resi, double credit, int64_t& recL1, int64_t& groupDiff ) const
+{
+  const bool                  is8x8     = n == 8;
+  const int                   numGroups = is8x8 ? PSY_NUM_GROUPS : PSY_NUM_GROUPS_4x4;
+  const auto                  groupSums = is8x8 ? m_psyGroupSums8x8 : m_psyGroupSums4x4;
+  const std::vector<int32_t>& table     = is8x8 ? pic.psyOrgGroups : pic.psyOrgGroups4x4;
+  int64_t recSums[PSY_NUM_GROUPS], orgSums[PSY_NUM_GROUPS];
+  groupSums( rec.bufAt( xInArea, yInArea ), rec.stride, resi.buf ? resi.bufAt( xInArea, yInArea ) : nullptr, resi.stride, recSums );
+  if( !table.empty() && !( ( x | y ) & 3 ) )
+  {
+    const int32_t* kept = &table[( size_t( y >> 2 ) * pic.psyGridW + ( x >> 2 ) ) * numGroups];
+    std::copy( kept, kept + numGroups, orgSums );
+  }
+  else
+  {
+    groupSums( org.bufAt( xInArea, yInArea ), org.stride, nullptr, 0, orgSums );
+  }
+  recL1     = 0;
+  groupDiff = 0;
+  for( int g = 0; g < numGroups; g++ )
+  {
+    recL1     += recSums[g];
+    // without a credit (most calls) the product below is the sum itself: no conversions
+    groupDiff += std::abs( orgSums[g] - ( credit == 1.0 ? recSums[g] : int64_t( credit * double( recSums[g] ) + 0.5 ) ) );
+  }
+}
+
+// The same difference of an n x n block under 4 samples (ISP slivers), which has no band: every AC coefficient is its
+// own group there.
+int64_t RdCost::xPsySliverDiff( const Pel* org, ptrdiff_t orgStride, const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, int n, double credit )
+{
+  int64_t diff = 0;
+  int     o[4], r[4];
+  psyTransformPair( org, orgStride, rec, recStride, resi, resiStride, n, o, r );
+  for( int i = 1; i < n * n; i++ )
+  {
+    diff += std::abs( std::abs( o[i] ) - ( credit == 1.0 ? std::abs( r[i] ) : int( credit * std::abs( r[i] ) + 0.5 ) ) );
+  }
+  return diff;
+}
+
+// the L1 norm of an n x n block's unnormalized Walsh-Hadamard transform over its psy band: for n = 8 / 4 the fine band
+// PSY_BAND_8x8 / _4x4 (RdCost.h), for n = 1 / 2 (ISP sub-partitions, too small for a band) every AC coefficient. The
+// transform is linear and maps a constant block to its DC coefficient alone, which no band holds, so no mean needs to be
+// removed.
+int64_t RdCost::xPsyBandL1( const Pel* src, ptrdiff_t stride, int n )
+{
+  int blk[64];
+  for( int y = 0; y < n; y++ )
+    for( int x = 0; x < n; x++ )
+      blk[y * n + x] = src[y * stride + x];
+  psyHadamard( blk, n );
   int64_t energy = 0;
   if( n >= 4 )
   {
@@ -120,26 +215,6 @@ int64_t RdCost::xPsyBandL1( const Pel* src, ptrdiff_t stride, int n )
       energy += std::abs( blk[i] );
   }
   return energy;
-}
-
-// the same for the n x n block a + b, the sum taken as Pel (the unclipped prediction + residual of the transform decisions)
-static int64_t psyBandSum( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int n )
-{
-  Pel sum[64];
-  for( int y = 0; y < n; y++ )
-    for( int x = 0; x < n; x++ )
-      sum[y * n + x] = Pel( a[y * aStride + x] + b[y * bStride + x] );
-  return RdCost::xPsyBandL1( sum, n, n );
-}
-
-int64_t RdCost::xPsyBand8x8Sum( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride )
-{
-  return psyBandSum( a, aStride, b, bStride, 8 );
-}
-
-int64_t RdCost::xPsyBand4x4Sum( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride )
-{
-  return psyBandSum( a, aStride, b, bStride, 4 );
 }
 
 int64_t RdCost::xPsyEnergy( const Pel* src, ptrdiff_t stride, int n, int shift ) const
@@ -300,13 +375,31 @@ void RdCost::buildPsyOrgEnergies( Picture& pic, int bitDepth ) const
   pic.psyGridW = gridW;
   pic.psyOrgEnergy[0].assign( size_t( gridW ) * gridH, 0 );
   pic.psyOrgEnergy[1].assign( size_t( gridW ) * gridH, 0 );
+  pic.psyOrgGroups.assign( size_t( gridW ) * gridH * PSY_NUM_GROUPS, 0 );
+  pic.psyOrgGroups4x4.assign( size_t( gridW ) * gridH * PSY_NUM_GROUPS_4x4, 0 );
   for( int y = 0; y < gridH; y++ )
     for( int x = 0; x < gridW; x++ )
     {
       const Pel* src = org.bufAt( 4 * x, 4 * y );
       if( 4 * x + 8 <= int( org.width ) && 4 * y + 8 <= int( org.height ) )
-        pic.psyOrgEnergy[0][y * gridW + x] = int32_t( xPsyEnergy( src, org.stride, 8, shift ) );
-      pic.psyOrgEnergy[1][y * gridW + x] = int32_t( xPsyEnergy( src, org.stride, 4, shift ) );
+      {
+        int64_t groups[PSY_NUM_GROUPS], l1 = 0;   // one transform: the groups, and their sum is the band L1 of xPsyEnergy
+        m_psyGroupSums8x8( src, org.stride, nullptr, 0, groups );
+        for( int g = 0; g < PSY_NUM_GROUPS; g++ )
+        {
+          pic.psyOrgGroups[( size_t( y ) * gridW + x ) * PSY_NUM_GROUPS + g] = int32_t( groups[g] );
+          l1 += groups[g];
+        }
+        pic.psyOrgEnergy[0][y * gridW + x] = int32_t( ( l1 / 8 ) >> shift );
+      }
+      int64_t groups[PSY_NUM_GROUPS_4x4], l1 = 0;
+      m_psyGroupSums4x4( src, org.stride, nullptr, 0, groups );
+      for( int g = 0; g < PSY_NUM_GROUPS_4x4; g++ )
+      {
+        pic.psyOrgGroups4x4[( size_t( y ) * gridW + x ) * PSY_NUM_GROUPS_4x4 + g] = int32_t( groups[g] );
+        l1 += groups[g];
+      }
+      pic.psyOrgEnergy[1][y * gridW + x] = int32_t( ( l1 / 4 ) >> shift );
     }
   buildPsyEdgeGate( pic, org, gridW, gridH );
 }
@@ -333,14 +426,13 @@ Distortion RdCost::getPsyDistortion( const Picture& pic, const CompArea& area, c
   for( int y = 0; y + n <= int( org.height ); y += n )
     for( int x = 0; x + n <= int( org.width ); x += n )
     {
-      int64_t recEnergy;
-      if( resi.buf && n == 8 )   // the kernels add the residual themselves
+      int64_t recEnergy, groupDiff;
+      if( n >= 4 )   // one transform of the reconstruction gives its band L1 and its groups
       {
-        recEnergy = ( m_psyBand8x8Sum( rec.bufAt( x, y ), rec.stride, resi.bufAt( x, y ), resi.stride ) / 8 ) >> shift;
-      }
-      else if( resi.buf && n == 4 )
-      {
-        recEnergy = ( m_psyBand4x4Sum( rec.bufAt( x, y ), rec.stride, resi.bufAt( x, y ), resi.stride ) / 4 ) >> shift;
+        int64_t recL1;
+        xPsyBlock( pic, org, area.x + x, area.y + y, x, y, n, rec, resi, m_psyRecCredit, recL1, groupDiff );
+        recEnergy = ( recL1 / n ) >> shift;
+        groupDiff = ( groupDiff / n ) >> shift;
       }
       else if( resi.buf )
       {
@@ -357,9 +449,37 @@ Distortion RdCost::getPsyDistortion( const Picture& pic, const CompArea& area, c
       {
         recEnergy = int64_t( double( recEnergy ) * m_psyRecCredit + 0.5 );
       }
-      diff += std::abs( xPsyOrgEnergy( pic, org, area.x + x, area.y + y, x, y, n, shift ) - recEnergy );
+      // the band-energy difference and, with PSY_GROUP_WEIGHT, the group-by-group difference (see PSY_GROUPS_8x8)
+      const int64_t energyDiff = std::abs( xPsyOrgEnergy( pic, org, area.x + x, area.y + y, x, y, n, shift ) - recEnergy );
+      if( n < 4 )
+      {
+        groupDiff = ( xPsySliverDiff( org.bufAt( x, y ), org.stride, rec.bufAt( x, y ), rec.stride, resi.buf ? resi.bufAt( x, y ) : nullptr, resi.stride, n, m_psyRecCredit ) / n ) >> shift;
+      }
+      diff += int64_t( PSY_GROUP_WEIGHT * double( groupDiff ) + ( 1.0 - PSY_GROUP_WEIGHT ) * double( energyDiff ) + 0.5 );
     }
   return Distortion( m_psyStrength * sqrt( m_dLambda ) * double( diff ) + 0.5 );
+}
+
+int64_t RdCost::getPsyGroupGap( const Picture& pic, const CompArea& area, const CPelBuf& pred, const CPelBuf& resi ) const
+{
+  const CPelBuf org = pic.getOrigBuf( area );
+  const int     n   = std::min<int>( 8, std::min<int>( org.width, org.height ) );
+  int64_t       gap = 0;
+  for( int y = 0; y + n <= int( org.height ); y += n )
+    for( int x = 0; x + n <= int( org.width ); x += n )
+    {
+      if( n >= 4 )
+      {
+        int64_t recL1, groupDiff;
+        xPsyBlock( pic, org, area.x + x, area.y + y, x, y, n, pred, resi, 1.0, recL1, groupDiff );
+        gap += groupDiff;
+      }
+      else
+      {
+        gap += xPsySliverDiff( org.bufAt( x, y ), org.stride, pred.bufAt( x, y ), pred.stride, resi.buf ? resi.bufAt( x, y ) : nullptr, resi.stride, n, 1.0 );
+      }
+    }
+  return gap;
 }
 
 int64_t RdCost::getPsyEnergyGap( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const
@@ -426,9 +546,9 @@ void RdCost::create( bool enableOpt )
   m_fxdWtdPredPtr = fixWeightedSSE_Core;
   m_bvBitsLineIBC = bvBitsLineCore;
   m_psyBand8x8    = RdCost::xPsyBand8x8;
-  m_psyBand8x8Sum = RdCost::xPsyBand8x8Sum;
   m_psyBand4x4    = RdCost::xPsyBand4x4;
-  m_psyBand4x4Sum = RdCost::xPsyBand4x4Sum;
+  m_psyGroupSums8x8 = RdCost::xPsyGroupSums8x8;
+  m_psyGroupSums4x4 = RdCost::xPsyGroupSums4x4;
 
   m_afpDistortFuncX5[0] = RdCost::xGetSAD8X5;
   m_afpDistortFuncX5[1] = RdCost::xGetSAD16X5;

@@ -834,6 +834,18 @@ void TrQuant::transformNxN(TransformUnit &tu, const ComponentID compID, const Qp
   TU::setCbfAtDepth (tu, compID, tu.depth, uiAbsSum > 0);
 }
 
+void TrQuant::requantLumaWithoutPsyRdoq( TransformUnit& tu, const QpParam& cQP, TCoeff& uiAbsSum, const Ctx& ctx, const bool loadTr )
+{
+  const CompArea& rect = tu.blocks[COMP_Y];
+  CoeffBuf tempCoeff( loadTr ? m_mtsCoeffs[tu.mtsIdx[COMP_Y]] : m_plTempCoeff, rect );   // as transformNxN left it
+  const double strength = m_quant->getPsyRdoqStrength();
+  m_quant->setPsyRdoqStrength( 0.0 );
+  uiAbsSum = 0;
+  xQuant( tu, COMP_Y, tempCoeff, uiAbsSum, cQP, ctx );
+  m_quant->setPsyRdoqStrength( strength );
+  TU::setCbfAtDepth( tu, COMP_Y, tu.depth, uiAbsSum > 0 );
+}
+
 void TrQuant::keepPrimaryCoeffs( const bool keep )
 {
   m_keepPrimary = keep;

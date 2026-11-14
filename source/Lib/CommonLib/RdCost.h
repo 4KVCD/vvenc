@@ -119,6 +119,44 @@ constexpr PsyBandMask psyBandMask( int n, int minSequency )
 }
 
 static constexpr PsyBandMask PSY_BAND_8x8 = psyBandMask( 8, 4 );
+
+// The band in groups: an orientation (the sequency along one axis at least twice the other's: 0 or 1; else mixed: 2) and,
+// for the 8x8 transform, a fineness ring (sequency sum under 8: + 0, from 8: + 3). Film grain spreads its energy over all
+// groups; a stripe (a few long cosines of a large transform, a directional prediction) fills one orientation. A block
+// whose band energy equals the source's can therefore still differ from it group by group: psy-rd counts that difference
+// with weight PSY_GROUP_WEIGHT beside the band-energy difference. On film grain this keeps what the energy difference
+// alone keeps (gangster_chase: strokes, patchwork, pulsing and missing grain unchanged at equal size); on clean video it
+// removes a quarter of the stripes the energy difference alone rewards (wrath_of_man: -24 % at equal size). Higher
+// weights keep less grain on film (0.5, 0.75 and 1 measured); comparing coefficient by coefficient, or choosing the
+// measure by the source block's own band, loses the grain of flat areas.
+// keep[g][v * n + u] is -1 inside group g, 0 outside.
+static constexpr int    PSY_NUM_GROUPS   = 6;
+static constexpr double PSY_GROUP_WEIGHT = 0.25;
+
+struct PsyGroupMasks
+{
+  alignas( 32 ) int32_t keep[PSY_NUM_GROUPS][64];
+};
+
+constexpr PsyGroupMasks psyGroupMasks( int n, int minSequency )
+{
+  PsyGroupMasks masks{};
+  for( int v = 0; v < n; v++ )
+    for( int u = 0; u < n; u++ )
+    {
+      const int su = hadamardRowSequency( u, n ), sv = hadamardRowSequency( v, n );
+      if( su + sv >= minSequency )
+      {
+        const int g = ( su >= 2 * sv ? 0 : sv >= 2 * su ? 1 : 2 ) + ( n == 8 && su + sv >= 8 ? 3 : 0 );
+        masks.keep[g][v * n + u] = -1;
+      }
+    }
+  return masks;
+}
+
+static constexpr PsyGroupMasks PSY_GROUPS_8x8 = psyGroupMasks( 8, 4 );
+static constexpr PsyGroupMasks PSY_GROUPS_4x4 = psyGroupMasks( 4, 2 );   // three groups: a 4x4 band has one ring
+static constexpr int PSY_NUM_GROUPS_4x4 = 3;
 static constexpr PsyBandMask PSY_BAND_4x4 = psyBandMask( 4, 2 );   // the same frequencies: a 4x4 row spans half the samples
 
 // ====================================================================================================================
@@ -174,11 +212,13 @@ public:
   void       ( *m_bvBitsLineIBC )( const Mv* predictors, const int x0, const int xStep, const int count, const int y, const bool useIMV, unsigned* bits );
   // psy-rd: the L1 norm of an 8x8 block's unnormalized Walsh-Hadamard transform over the fine band PSY_BAND_8x8
   int64_t    ( *m_psyBand8x8 )( const Pel* src, ptrdiff_t stride );
-  // the same of the block a + b, each sample summed as Pel (prediction + residual, unclipped)
-  int64_t    ( *m_psyBand8x8Sum )( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride );
-  // the same two of a 4x4 block, over PSY_BAND_4x4
+  // the same of a 4x4 block, over PSY_BAND_4x4
   int64_t    ( *m_psyBand4x4 )( const Pel* src, ptrdiff_t stride );
-  int64_t    ( *m_psyBand4x4Sum )( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride );
+  // per group of PSY_GROUPS_8x8: the L1 of the transform coefficients of the 8x8 block a, or a + b summed as Pel when b
+  // is given (prediction + residual, unclipped). The six sums add up to m_psyBand8x8 of the same block.
+  void       ( *m_psyGroupSums8x8 )( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS] );
+  // the same of a 4x4 block: the PSY_NUM_GROUPS_4x4 sums of PSY_GROUPS_4x4, which add up to m_psyBand4x4
+  void       ( *m_psyGroupSums4x4 )( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS_4x4] );
 
   // for distortion
   FpDistFunc              m_afpDistortFunc[2][DF_TOTAL_FUNCTIONS]; // [eDFunc]
@@ -252,6 +292,9 @@ public:
   // of rec, or of rec + resi when resi is given (the transform decisions have the residual but no reconstruction yet)
   Distortion    getPsyDistortion    ( const Picture& pic, const CompArea& area, const CPelBuf& rec, const CPelBuf& resi, int bitDepth ) const;
   Distortion    getPsyDistortion    ( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const { return getPsyDistortion( pic, area, rec, CPelBuf(), bitDepth ); }
+  // the grouped band difference of pred + resi (resi may be empty) to the source over the area's n x n blocks (no
+  // strength, lambda or credit): psy-rdoq's per-TU choice compares two quantisations with it
+  int64_t       getPsyGroupGap      ( const Picture& pic, const CompArea& area, const CPelBuf& pred, const CPelBuf& resi ) const;
   // the sum over the area's whole 8x8 blocks of | E_org - E_rec | (no strength, lambda or credit): SAO weighs its changes
   int64_t       getPsyEnergyGap     ( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const;
 
@@ -343,9 +386,11 @@ public:
   static Distortion xGetHAD2SADs      ( const DistParam& pcDtParam );
   static int64_t    xPsyBandL1        ( const Pel* src, ptrdiff_t stride, int n );
   static int64_t    xPsyBand8x8       ( const Pel* src, ptrdiff_t stride ) { return xPsyBandL1( src, stride, 8 ); }
-  static int64_t    xPsyBand8x8Sum    ( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride );
   static int64_t    xPsyBand4x4       ( const Pel* src, ptrdiff_t stride ) { return xPsyBandL1( src, stride, 4 ); }
-  static int64_t    xPsyBand4x4Sum    ( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride );
+  static void       xPsyGroupSums8x8  ( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS] );
+  static void       xPsyGroupSums4x4  ( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS_4x4] );
+  void              xPsyBlock         ( const Picture& pic, const CPelBuf& org, int x, int y, int xInArea, int yInArea, int n, const CPelBuf& rec, const CPelBuf& resi, double credit, int64_t& recL1, int64_t& groupDiff ) const;
+  static int64_t    xPsySliverDiff    ( const Pel* org, ptrdiff_t orgStride, const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, int n, double credit );
   int64_t           xPsyEnergy        ( const Pel* src, ptrdiff_t stride, int n, int shift ) const;
   int64_t           xPsyOrgEnergy     ( const Picture& pic, const CPelBuf& org, int x, int y, int xInArea, int yInArea, int n, int shift ) const;
   template<bool fastHad>

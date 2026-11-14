@@ -346,6 +346,7 @@ namespace DQIntern
       m_DistOrgFact = weight.orgFact;
     }
     void   setPsyRdoqStrength( double strength ) { m_psyRdoqStrength = strength; }
+    double getPsyRdoqStrength() const { return m_psyRdoqStrength; }
     bool   usesPsyRdoq     ( const TransformUnit& tu, const ComponentID compID ) const;
     // psy-rdoq's distortion credit of a level qIdx (in qIdx units) at a source amplitude of org16 / 16 qIdx units
     int64_t psyCredit      ( int64_t qIdx, int64_t org16 ) const { return ( m_psyBonus * std::min<int64_t>( qIdx << 4, org16 ) ) >> 4; }
@@ -545,6 +546,7 @@ public:
   void setLevelLambdaScale( double scale ) { m_levelLambdaScale = scale; }
   // psy-rdoq strength (0: off), see DQIntern::Quantizer::usesPsyRdoq
   void setPsyRdoqStrength ( double strength ) { m_quant.setPsyRdoqStrength( strength ); }
+  double getPsyRdoqStrength() const { return m_quant.getPsyRdoqStrength(); }
 
 private:
   void    xQuantDQ          ( TransformUnit& tu, const CCoeffBuf& srcCoeff, const ComponentID compID, const QpParam& cQP, const double lambda, const Ctx& ctx, TCoeff& absSum, bool enableScalingLists, int* quantCoeff );

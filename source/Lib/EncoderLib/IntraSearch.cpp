@@ -175,6 +175,36 @@ static bool touchesPsyEdge( const Picture& pic, const CompArea& area )
   return false;
 }
 
+// the quantised levels of one luma TU: what the quantiser leaves in the TU
+struct LumaLevels
+{
+  TCoeffSig levels[MAX_TB_SIZEY * MAX_TB_SIZEY];   // on the stack: one pair per I-slice luma TU
+  int       lastPos = -1;
+  TCoeff    absSum  = 0;
+
+  void save( TransformUnit& tu, TCoeff sum )
+  {
+    const CoeffSigBuf buf = tu.getCoeffs( COMP_Y );
+    CHECKD( buf.width > MAX_TB_SIZEY || buf.height > MAX_TB_SIZEY, "luma TU larger than the largest transform" );
+    for( unsigned y = 0; y < buf.height; y++ )
+    {
+      std::copy( buf.bufAt( 0, y ), buf.bufAt( 0, y ) + buf.width, levels + y * buf.width );
+    }
+    lastPos = tu.lastPos[COMP_Y];
+    absSum  = sum;
+  }
+  void restore( TransformUnit& tu ) const
+  {
+    CoeffSigBuf buf = tu.getCoeffs( COMP_Y );
+    for( unsigned y = 0; y < buf.height; y++ )
+    {
+      std::copy( levels + y * buf.width, levels + ( y + 1 ) * buf.width, buf.bufAt( 0, y ) );
+    }
+    tu.lastPos[COMP_Y] = lastPos;
+    TU::setCbfAtDepth( tu, COMP_Y, tu.depth, absSum > 0 );
+  }
+};
+
 double IntraSearch::xFindInterCUCost( CodingUnit &cu )
 {
   if( CU::isConsIntra(cu) && !cu.slice->isIntra() )
@@ -1533,6 +1563,48 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID compI
   {
     const QpParam cQP = lumaQP ? *lumaQP : QpParam( tu, compID );
     m_pcTrQuant->transformNxN(tu, compID, cQP, uiAbsSum, m_CABACEstimator->getCtx(), loadTr, lfnstPrimary);
+
+    // psy-rdoq keeps levels so that the I picture keeps the source's fine texture. In a large transform a few kept levels
+    // are long cosines: strokes, not grain, which every picture predicted from this one inherits. So its levels stay only
+    // where they bring the reconstruction's fine band (8x8 blocks, group by group: RdCost::getPsyGroupGap) closer to the
+    // source's than the plain quantisation does; else the plain levels are coded. (With the grouped psy difference of
+    // RdCost.h: wrath_of_man strokes -24 % at equal size, gangster_chase's film grain unchanged.) ISP and BDPCM blocks
+    // keep psy-rdoq's result: their sub-blocks predict from each other.
+    if( uiAbsSum > 0 && cs.slice->isIntra() && tu.mtsIdx[COMP_Y] != MTS_SKIP && !cu.ispMode && !cu.bdpcmM[CH_L]
+        && m_pcTrQuant->getQuant()->getPsyRdoqStrength() > 0.0 )
+    {
+      LumaLevels withPsy, plain;
+      withPsy.save( tu, uiAbsSum );
+      TCoeff plainAbsSum = 0;
+      m_pcTrQuant->requantLumaWithoutPsyRdoq( tu, cQP, plainAbsSum, m_CABACEstimator->getCtx(), loadTr );
+      plain.save( tu, plainAbsSum );
+
+      // each result's distance to the source; the inverse transforms overwrite the residual, which the code below
+      // computes again from the chosen levels
+      int64_t plainGap;
+      if( plain.absSum > 0 )
+      {
+        m_pcTrQuant->invTransformNxN( tu, compID, piResi, cQP );
+        plainGap = m_pcRdCost->getPsyGroupGap( *cs.picture, area, piPred, piResi );
+      }
+      else
+      {
+        plainGap = m_pcRdCost->getPsyGroupGap( *cs.picture, area, piPred, CPelBuf() );
+      }
+      withPsy.restore( tu );
+      m_pcTrQuant->invTransformNxN( tu, compID, piResi, cQP );
+      const int64_t psyGap = m_pcRdCost->getPsyGroupGap( *cs.picture, area, piPred, piResi );
+
+      if( psyGap < plainGap )
+      {
+        uiAbsSum = withPsy.absSum;   // psy-rdoq's levels are in the TU
+      }
+      else
+      {
+        plain.restore( tu );
+        uiAbsSum = plain.absSum;
+      }
+    }
 
     DTRACE( g_trace_ctx, D_TU_ABS_SUM, "%d: comp=%d, abssum=%d\n", DTRACE_GET_COUNTER( g_trace_ctx, D_TU_ABS_SUM ), compID, uiAbsSum );
     if (tu.cu->ispMode && isLuma(compID) && CU::isISPLast(*tu.cu, area, area.compID) && CU::allLumaCBFsAreZero(*tu.cu))
