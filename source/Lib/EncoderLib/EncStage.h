@@ -88,6 +88,7 @@ private:
   bool             m_fgaSceneCut = false;          // the picture starts a new scene (film grain analysis)
   bool             m_sceneCutStart = false;        // the picture starts a new scene (adaptive intra refresh mode 1)
   int              m_fgaLastSceneCutPoc = std::numeric_limits<int>::min();   // the latest scene cut before it
+  bool             m_fgaShotRestart = false;       // the picture after a shot start: its analysis restarts the shot's statistics
   uint64_t         m_cts;
   int              m_maxFrames;
   int              m_poc;
@@ -142,6 +143,7 @@ public:
   bool&        fgaSceneCut()           { return m_fgaSceneCut; }
   bool&        sceneCutStart()         { return m_sceneCutStart; }
   int&         fgaLastSceneCutPoc()    { return m_fgaLastSceneCutPoc; }
+  bool&        fgaShotRestart()        { return m_fgaShotRestart; }
   Size         getLumaSize()     const { return m_origBuf.Y(); }
 
   void create( int maxFrames, ChromaFormat chromaFormat, const Size& size, bool useFilter )
@@ -169,6 +171,7 @@ public:
     m_sceneCutStart      = false;
     freeLowRes();   // normally freed already with the previous picture
     m_fgaLastSceneCutPoc = std::numeric_limits<int>::min();
+    m_fgaShotRestart     = false;
 
     m_picVA.reset();
     m_isSccWeak    = false;
