@@ -7255,8 +7255,8 @@ struct SaoOffsetBlockAccess : public SampleAdaptiveOffset
   using SampleAdaptiveOffset::offsetBlock;
 };
 
-// offsetBlock for every SAO type and every availability mask the encoder can give, block sizes as offsetCTU passes
-// them (multiples of 4, picture-edge CTUs included), samples with a one-sample border of valid values (the edge classes
+// offsetBlock for every SAO type, availability mask and block width offsetCTU can pass (multiples of 4, picture-edge
+// CTUs included), samples with a one-sample border of valid values (the edge classes
 // read it), offsets as the encoder's (edge class 0 offset 0; band offset nonzero only in the four bands from startIdx);
 // the whole block compared, positions the C code leaves alone included (they must keep their samples), not the rest of
 // the rows (the SSE kernel stores whole vectors past a block width that is not a multiple of 8: the picture margin at
@@ -7273,8 +7273,10 @@ static bool check_SAOoffsetBlock( SaoOffsetBlockAccess* ref, SaoOffsetBlockAcces
   {
     for( int availMask = 0; availMask < 256; availMask++ )
     {
-      // only masks deriveLoopFilterBoundaryAvailibility can give (raster slices, tiles): the CTUs between the current
-      // one and a neighbour of its slice / tile in raster order, or inside the tile rectangle, are there too
+#if !defined( TARGET_SIMD_ARM )
+      // the SSE kernel's diagonal classes assume the masks deriveLoopFilterBoundaryAvailibility can give (raster
+      // slices, tiles: the CTUs between the current one and a neighbour of its slice / tile in raster order, or inside
+      // the tile rectangle, are there too); the NEON kernel matches the C code on every mask
       auto has = [availMask]( int bits ) { return ( availMask & bits ) == bits; };
       if( ( has( AboveLeftAvail ) && !has( AboveAvail | LeftAvail ) )
           || ( has( BelowRightAvail ) && !has( BelowAvail | RightAvail ) )
@@ -7283,58 +7285,63 @@ static bool check_SAOoffsetBlock( SaoOffsetBlockAccess* ref, SaoOffsetBlockAcces
       {
         continue;
       }
-      const int width  = rng.getOneOf<int>( { 4, 8, 12, 16, 20, 24, 36, 64, 128 } );
-      const int height = rng.getOneOf<int>( { 4, 8, 12, 16, 32, 64 } );
-      // strides past the width rounded up to 16, as a picture's
-      const ptrdiff_t srcStride = ( ( width + 2 + 15 ) & ~15 ) + rng.get( 0, 4 );
-      const ptrdiff_t resStride = ( ( width + 15 ) & ~15 ) + rng.get( 0, 4 );
-      std::vector<Pel> src( srcStride * ( height + 2 ) );
-      std::generate( src.begin(), src.end(), samples );
-      if( availMask & 1 )
+#endif
+      for( int width : { 4, 8, 12, 16, 20, 24, 36, 64, 128 } )
       {
-        // runs of one value (edge class 0, band offset in one band)
-        std::fill( src.begin() + srcStride, src.begin() + srcStride + width / 2, Pel( rng.get( 0, ( 1 << bd ) - 1 ) ) );
-      }
-      // the destination holds the block's own samples before SAO, as in offsetCTU (the SSE kernel stores them back,
-      // unchanged, at positions the C code skips)
-      std::vector<Pel> resRef( resStride * height, 0x5a5a );
-      for( int y = 0; y < height; y++ )
-      {
-        std::copy_n( src.data() + ( y + 1 ) * srcStride + 1, width, resRef.data() + y * resStride );
-      }
-      std::vector<Pel> resOpt = resRef;
-
-      int offset[MAX_NUM_SAO_CLASSES] = { 0 };
-      const int startIdx = rng.get( 0, MAX_NUM_SAO_CLASSES - 1 );
-      for( int k = 0; k < 4; k++ )
-      {
-        const int value = int( rng.get( 0, 2 * maxOffset ) ) - maxOffset;
-        if( typeIdx == SAO_TYPE_BO )
+        const int height = rng.getOneOf<int>( { 4, 8, 12, 16, 32, 64 } );
+        // strides past the width rounded up to 16, in steps of 8 samples (16 bytes: the SSE kernel's stores are
+        // aligned), as a picture's; the source padded by 16 samples (the SSE kernel reads whole vectors past the block)
+        const ptrdiff_t srcStride = ( ( width + 2 + 15 ) & ~15 ) + 8 * rng.get( 0, 2 );
+        const ptrdiff_t resStride = ( ( width + 15 ) & ~15 ) + 8 * rng.get( 0, 2 );
+        std::vector<Pel> src( srcStride * ( height + 2 ) + 16 );
+        std::generate( src.begin(), src.end(), samples );
+        if( availMask & 1 )
         {
-          offset[( startIdx + k ) % MAX_NUM_SAO_CLASSES] = value;
+          // runs of one value (edge class 0, band offset in one band)
+          const Pel value = Pel( rng.get( 0, ( 1 << bd ) - 1 ) );
+          std::fill( src.begin() + srcStride, src.begin() + srcStride + width / 2, value );
         }
-        else
+        // the destination holds the block's own samples before SAO, as in offsetCTU (the SSE kernel stores them back,
+        // unchanged, at positions the C code skips)
+        std::vector<Pel> resRef( resStride * height, 0x5a5a );
+        for( int y = 0; y < height; y++ )
         {
-          offset[k < 2 ? k : k + 1] = value;   // edge classes -2, -1, 1, 2; class 0 keeps 0
+          std::copy_n( src.data() + ( y + 1 ) * srcStride + 1, width, resRef.data() + y * resStride );
         }
-      }
-      // the sign lines as SampleAdaptiveOffset::init sizes them (the CTU width + 1; the SSE kernel reads and writes
-      // whole vectors of them)
-      std::vector<int8_t> signRef1( 256 ), signRef2( 256 ), signOpt1( 256 ), signOpt2( 256 );
-      const Pel* srcBlk = src.data() + srcStride + 1;
-      ref->offsetBlock( bd, clpRng, typeIdx, offset, startIdx, srcBlk, resRef.data(), srcStride, resStride, width,
-                        height, uint8_t( availMask ), signRef1, signRef2 );
-      opt->offsetBlock( bd, clpRng, typeIdx, offset, startIdx, srcBlk, resOpt.data(), srcStride, resStride, width,
-                        height, uint8_t( availMask ), signOpt1, signOpt2 );
+        std::vector<Pel> resOpt = resRef;
 
-      std::ostringstream sstm;
-      sstm << "offsetBlock type=" << typeIdx << " availMask=" << availMask << " " << width << "x" << height
-           << " startIdx=" << startIdx;
-      for( int y = 0; y < height; y++ )
-      {
-        if( !compare_values_1d( sstm.str(), resRef.data() + y * resStride, resOpt.data() + y * resStride, width ) )
+        int offset[MAX_NUM_SAO_CLASSES] = { 0 };
+        const int startIdx = rng.get( 0, MAX_NUM_SAO_CLASSES - 1 );
+        for( int k = 0; k < 4; k++ )
         {
-          return false;
+          const int value = int( rng.get( 0, 2 * maxOffset ) ) - maxOffset;
+          if( typeIdx == SAO_TYPE_BO )
+          {
+            offset[( startIdx + k ) % MAX_NUM_SAO_CLASSES] = value;
+          }
+          else
+          {
+            offset[k < 2 ? k : k + 1] = value;   // edge classes -2, -1, 1, 2; class 0 keeps 0
+          }
+        }
+        // the sign lines as SampleAdaptiveOffset::init sizes them (the CTU width + 1; the SSE kernel reads and writes
+        // whole vectors of them)
+        std::vector<int8_t> signRef1( 256 ), signRef2( 256 ), signOpt1( 256 ), signOpt2( 256 );
+        const Pel* srcBlk = src.data() + srcStride + 1;
+        ref->offsetBlock( bd, clpRng, typeIdx, offset, startIdx, srcBlk, resRef.data(), srcStride, resStride, width,
+                          height, uint8_t( availMask ), signRef1, signRef2 );
+        opt->offsetBlock( bd, clpRng, typeIdx, offset, startIdx, srcBlk, resOpt.data(), srcStride, resStride, width,
+                          height, uint8_t( availMask ), signOpt1, signOpt2 );
+
+        std::ostringstream sstm;
+        sstm << "offsetBlock type=" << typeIdx << " availMask=" << availMask << " " << width << "x" << height
+             << " startIdx=" << startIdx;
+        for( int y = 0; y < height; y++ )
+        {
+          if( !compare_values_1d( sstm.str(), resRef.data() + y * resStride, resOpt.data() + y * resStride, width ) )
+          {
+            return false;
+          }
         }
       }
     }
