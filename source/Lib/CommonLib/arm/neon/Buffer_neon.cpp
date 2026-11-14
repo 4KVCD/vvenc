@@ -54,6 +54,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "CommonLib/Unit.h"
 #include "CommonLib/Buffer.h"
 #include "../Buffer_neon.h"
+#include "../mem_neon.h"
 #include "sum_neon.h"
 #include "transpose_neon.h"
 
@@ -1430,6 +1431,130 @@ static uint64_t sumSquaredError_neon( const Pel* src0, const ptrdiff_t stride0, 
   return sumSquaredError_common<SquareSumNeon>( src0, stride0, src1, stride1, width, height );
 }
 
+// adds the squared differences of eight samples to accLo (the first four) and accHi (the last four): two accumulators,
+// so that consecutive calls do not wait for each other
+static inline void addSquaredDiffs8( int32x4_t& accLo, int32x4_t& accHi, const Pel* src0, const Pel* src1 )
+{
+  const int16x8_t a    = vld1q_s16( src0 );
+  const int16x8_t b    = vld1q_s16( src1 );
+  const int16x8_t diff = vsubq_s16( a, b );
+  accLo = vmlal_s16( accLo, vget_low_s16( diff ), vget_low_s16( diff ) );
+  accHi = vmlal_s16( accHi, vget_high_s16( diff ), vget_high_s16( diff ) );
+}
+
+// The sums of squared errors of the numX x numY parts of lengthX x lengthY samples (Buffer.h). From width 16 on, the four
+// parts of a row of parts are summed in a vector each; the widths up to 8 sum each column first, then the columns of a
+// part. A lane adds at most 64 squares of 12-bit differences (2^30), and a part's sum fits 32 bits, so the lanes and the
+// unsigned additions of the part sums are exact.
+static void sumSquaredErrorParts_neon( const Pel* src0, const ptrdiff_t stride0, const Pel* src1, const ptrdiff_t stride1, const int lengthX, const int lengthY, const int numX, const int numY, uint32_t sums[][4] )
+{
+  const int width = lengthX * numX;
+  CHECKD( width > 8 && numX != 4, "only four parts in a row from width 16 up" );
+  CHECKD( width <= 8 && lengthX > 4, "parts of the widths up to 8 are 2 or 4 wide" );
+  for( int j = 0; j < numY; j++, src0 += lengthY * stride0, src1 += lengthY * stride1 )
+  {
+    const Pel* row0 = src0;
+    const Pel* row1 = src1;
+    uint32x4_t parts;
+    if( width == 16 )
+    {
+      // parts of 4: the halves of each vector of 8, one accumulator per part
+      int32x4_t acc0 = vdupq_n_s32( 0 );
+      int32x4_t acc1 = vdupq_n_s32( 0 );
+      int32x4_t acc2 = vdupq_n_s32( 0 );
+      int32x4_t acc3 = vdupq_n_s32( 0 );
+      for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+      {
+        addSquaredDiffs8( acc0, acc1, row0, row1 );
+        addSquaredDiffs8( acc2, acc3, row0 + 8, row1 + 8 );
+      }
+      parts = horizontal_add_4d_u32x4( vreinterpretq_u32_s32( acc0 ), vreinterpretq_u32_s32( acc1 ),
+                                       vreinterpretq_u32_s32( acc2 ), vreinterpretq_u32_s32( acc3 ) );
+    }
+    else if( width >= 32 )
+    {
+      // parts of 8 (a vector each) or 16 (two vectors each), with a low and a high accumulator per part
+      int32x4_t accLo0 = vdupq_n_s32( 0 ), accHi0 = vdupq_n_s32( 0 );
+      int32x4_t accLo1 = vdupq_n_s32( 0 ), accHi1 = vdupq_n_s32( 0 );
+      int32x4_t accLo2 = vdupq_n_s32( 0 ), accHi2 = vdupq_n_s32( 0 );
+      int32x4_t accLo3 = vdupq_n_s32( 0 ), accHi3 = vdupq_n_s32( 0 );
+      if( width == 32 )
+      {
+        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+        {
+          addSquaredDiffs8( accLo0, accHi0, row0, row1 );
+          addSquaredDiffs8( accLo1, accHi1, row0 + 8, row1 + 8 );
+          addSquaredDiffs8( accLo2, accHi2, row0 + 16, row1 + 16 );
+          addSquaredDiffs8( accLo3, accHi3, row0 + 24, row1 + 24 );
+        }
+      }
+      else
+      {
+        CHECKD( width != 64, "widths from 16 up are 16, 32 or 64" );
+        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+        {
+          addSquaredDiffs8( accLo0, accHi0, row0, row1 );
+          addSquaredDiffs8( accLo1, accHi1, row0 + 16, row1 + 16 );
+          addSquaredDiffs8( accLo2, accHi2, row0 + 32, row1 + 32 );
+          addSquaredDiffs8( accLo3, accHi3, row0 + 48, row1 + 48 );
+          addSquaredDiffs8( accLo0, accHi0, row0 + 8, row1 + 8 );
+          addSquaredDiffs8( accLo1, accHi1, row0 + 24, row1 + 24 );
+          addSquaredDiffs8( accLo2, accHi2, row0 + 40, row1 + 40 );
+          addSquaredDiffs8( accLo3, accHi3, row0 + 56, row1 + 56 );
+        }
+      }
+      const int32x4_t acc0 = vaddq_s32( accLo0, accHi0 );
+      const int32x4_t acc1 = vaddq_s32( accLo1, accHi1 );
+      const int32x4_t acc2 = vaddq_s32( accLo2, accHi2 );
+      const int32x4_t acc3 = vaddq_s32( accLo3, accHi3 );
+      parts = horizontal_add_4d_u32x4( vreinterpretq_u32_s32( acc0 ), vreinterpretq_u32_s32( acc1 ),
+                                       vreinterpretq_u32_s32( acc2 ), vreinterpretq_u32_s32( acc3 ) );
+    }
+    else
+    {
+      // per column: columns 0-3 in accLo, 4-7 in accHi; the lanes past the width stay 0
+      int32x4_t accLo = vdupq_n_s32( 0 );
+      int32x4_t accHi = vdupq_n_s32( 0 );
+      if( width == 8 )
+      {
+        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+        {
+          addSquaredDiffs8( accLo, accHi, row0, row1 );
+        }
+      }
+      else if( width == 4 )
+      {
+        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+        {
+          const int16x4_t a    = vld1_s16( row0 );
+          const int16x4_t b    = vld1_s16( row1 );
+          const int16x4_t diff = vsub_s16( a, b );
+          accLo = vmlal_s16( accLo, diff, diff );
+        }
+      }
+      else
+      {
+        CHECKD( width != 2, "widths up to 8 are 2, 4 or 8" );
+        for( int y = 0; y < lengthY; y++, row0 += stride0, row1 += stride1 )
+        {
+          const int16x4_t a    = load_s16x2( row0 );
+          const int16x4_t b    = load_s16x2( row1 );
+          const int16x4_t diff = vsub_s16( a, b );
+          accLo = vmlal_s16( accLo, diff, diff );
+        }
+      }
+      // the parts of 2 columns are the pair sums, those of 4 two of them
+      int32x4_t pairs = pairwise_add_s32x4( accLo, accHi );
+      if( lengthX == 4 )
+      {
+        pairs = pairwise_add_s32x4( pairs, pairs );
+      }
+      parts = vreinterpretq_u32_s32( pairs );
+    }
+    vst1q_u32( sums[j], parts );
+  }
+}
+
 template<>
 void PelBufferOps::_initPelBufOpsARM<NEON>()
 {
@@ -1467,7 +1592,8 @@ void PelBufferOps::_initPelBufOpsARM<NEON>()
   geoPrefixSums = geoPrefixSums_neon;
   geoRunSads    = geoRunSads_neon;
 
-  sumSquaredError = sumSquaredError_neon;
+  sumSquaredError      = sumSquaredError_neon;
+  sumSquaredErrorParts = sumSquaredErrorParts_neon;
 }
 
 } // namespace vvenc
