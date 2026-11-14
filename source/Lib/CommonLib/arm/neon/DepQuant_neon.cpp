@@ -783,7 +783,12 @@ struct DequantStateChain8
   }
 };
 
-static const DequantStateChain8 g_dequantStateChain8;   // only read through m_dequantCoeffs, after static initialisation
+// built on first use (a function-local static: no static initialisation order to rely on)
+static const uint16_t* dequantStateChain8()
+{
+  static const DequantStateChain8 table;
+  return table.entry;
+}
 
 // the sum of the 8 lanes (here distinct bits, so their OR)
 static inline unsigned addLanes_u16x8( const uint16x8_t v )
@@ -830,7 +835,8 @@ static void dequantCoeffs_neon( const TCoeffSig* qCoeff, TCoeff* tCoeff, const S
   const uint16x8_t scanIdx01 = vld1q_u16( rasterToScan ), scanIdx23 = vld1q_u16( rasterToScan + 8 );
   const uint16x8_t bit01     = vld1q_u16( scanBit ), bit23 = vld1q_u16( scanBit + 8 );
 
-  int chain = 0;   // the state between groups, << 8 (as in g_dequantStateChain8's entries)
+  const uint16_t* stateChain8 = dequantStateChain8();
+  int             chain       = 0;   // the state between groups, << 8 (as in stateChain8's entries)
   for( int group = lastScanIdx >> 4; group >= 0; group-- )
   {
     const int      firstIdx = group << 4;
@@ -853,9 +859,9 @@ static void dequantCoeffs_neon( const TCoeffSig* qCoeff, TCoeff* tCoeff, const S
     // time from scan index 15 down; stateBits bit i: the state before scan index i, >> 1
     const unsigned parities = addLanes_u16x8( vorrq_u16( vandq_u16( vtstq_s16( lvl01, vOne ), bit01 ),
                                                          vandq_u16( vtstq_s16( lvl23, vOne ), bit23 ) ) );
-    unsigned entry     = g_dequantStateChain8.entry[chain | ( parities >> 8 )];
+    unsigned entry     = stateChain8[chain | ( parities >> 8 )];
     unsigned stateBits = ( entry & 0xff ) << 8;
-    entry              = g_dequantStateChain8.entry[( entry & 0x300 ) | ( parities & 0xff )];
+    entry              = stateChain8[( entry & 0x300 ) | ( parities & 0xff )];
     stateBits         |= entry & 0xff;
     chain              = entry & 0x300;
 
