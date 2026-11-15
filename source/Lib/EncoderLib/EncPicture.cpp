@@ -135,6 +135,19 @@ void EncPicture::finalizePicture( Picture& pic )
     DTRACE_PIC_COMP( D_REC_CB_CHROMA_ALF, cs, cs.getRecoBuf(), COMP_Cr );
   }
 
+  // after the in-loop filters, before a picture referencing this one starts (isReconstructed is set after this function)
+  m_SliceEncoder.measurePsyLostShare( pic );
+
+  // psy-rd's tables of the source are read by the picture's CTU tasks only: give their memory back now (about 23 MB for
+  // a 4K picture) rather than keep it for as long as the picture stays in the encoder as a reference
+  for( auto& table : pic.psyOrgEnergy )
+  {
+    std::vector<int32_t>().swap( table );
+  }
+  std::vector<int32_t>().swap( pic.psyOrgGroups );
+  std::vector<int32_t>().swap( pic.psyOrgGroups4x4 );
+  std::vector<uint8_t>().swap( pic.psyEdgeGate );
+
   // write picture
   DTRACE_UPDATE( g_trace_ctx, std::make_pair( "bsfinal", 1 ) );
   xWriteSliceData( pic );

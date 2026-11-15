@@ -248,6 +248,7 @@ void EncGOP::initPicture( Picture* pic )
   pic->encTime.startTimer();
 
   pic->TLayer = pic->gopEntry->m_temporalId;
+  pic->psyLostShare = -1.0;   // not measured yet (a reused Picture object keeps the last picture's value)
   if( pic->ctsValid )
   {
     if( m_lastCts )
@@ -390,7 +391,9 @@ void EncGOP::xProcessPictures( AccessUnitList& auList, PicList& doneList )
         const std::list<Picture *>* rcUpdateList = &m_rcUpdateList;
         const VVEncCfg* encCfg = m_pcEncCfg;
         auto picItr            = find_if( m_procList.begin(), m_procList.end(), [encCfg, rcUpdateList]( auto pic ) {
-          return ( encCfg->m_ifp || pic->slices[ 0 ]->checkAllRefPicsReconstructed() )
+          // psy-rd reads what its reference pictures measured on their final reconstructions (EncSlice::measurePsyLostShare):
+          // such a picture starts only when they are complete, also with IFP, or its stream would depend on timing
+          return ( ( encCfg->m_ifp && !encCfg->m_psyRdStrengthVal ) || pic->slices[ 0 ]->checkAllRefPicsReconstructed() )
             && ( !encCfg->m_alf || ( !pic->refApsGlobal || pic->refApsGlobal->initalized ) )
             && ( !encCfg->m_rateCap || !encCfg->m_maxParallelFrames || !pic->isSceneCutGOP || (!rcUpdateList->front()->isSceneCutCheckAdjQP && !rcUpdateList->front()->gopEntry->m_isStartOfGop ) )
             ; } );
@@ -1164,8 +1167,10 @@ void EncGOP::xInitPPS(PPS &pps, const SPS &sps) const
   {
     for( int comp = 0; comp < MAX_NUM_COMP; comp++)
     {
-      pps.deblockingFilterBetaOffsetDiv2[comp]  = m_pcEncCfg->m_loopFilterBetaOffsetDiv2[comp];
-      pps.deblockingFilterTcOffsetDiv2[comp]    = m_pcEncCfg->m_loopFilterTcOffsetDiv2[comp];
+      // with psy-rd the offsets go to stock deblocking at low rates (the configured values come back unchanged at
+      // the other rates and without psy-rd)
+      pps.deblockingFilterBetaOffsetDiv2[comp]  = EncSlice::getPsyRateDeblockingOffset( *m_pcEncCfg, m_pcEncCfg->m_loopFilterBetaOffsetDiv2[comp] );
+      pps.deblockingFilterTcOffsetDiv2[comp]    = EncSlice::getPsyRateDeblockingOffset( *m_pcEncCfg, m_pcEncCfg->m_loopFilterTcOffsetDiv2[comp] );
     }
   }
 

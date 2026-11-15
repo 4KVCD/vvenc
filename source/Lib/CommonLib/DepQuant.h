@@ -279,6 +279,11 @@ namespace DQIntern
       m_DistStepAdd = weight.stepAdd;
       m_DistOrgFact = weight.orgFact;
     }
+    void   setPsyRdoqStrength( double strength ) { m_psyRdoqStrength = strength; }
+    double getPsyRdoqStrength() const { return m_psyRdoqStrength; }
+    bool   usesPsyRdoq     ( const TransformUnit& tu, const ComponentID compID ) const;
+    // psy-rdoq's distortion credit of a level qIdx (in qIdx units) at a source amplitude of org16 / 16 qIdx units
+    int64_t psyCredit      ( int64_t qIdx, int64_t org16 ) const { return ( m_psyBonus * std::min<int64_t>( qIdx << 4, org16 ) ) >> 4; }
 
     // quantization
     int               m_DqThrVal;
@@ -293,6 +298,9 @@ namespace DQIntern
     int64_t           m_DistAdd;
     int64_t           m_DistStepAdd;
     int64_t           m_DistOrgFact;
+    // psy-rdoq (I-slice luma, see usesPsyRdoq): the strength, and the block's distortion credit per qIdx unit (0: off)
+    double            m_psyRdoqStrength = 0.0;
+    int64_t           m_psyBonus        = 0;
   };
 
 #define RICEMAX 32
@@ -433,6 +441,11 @@ public:
   virtual void dequant( const TransformUnit& tu, CoeffBuf& dstCoeff, const ComponentID compID, const QpParam& cQP );
   
   virtual void init   ( int rdoq = 0, bool useRDOQTS = false, int dqThrVal = 8, bool keepHighBand = false );
+  // LevelLambda: the scale of the lambda in the luma level decisions
+  void setLevelLambdaScale( double scale ) { m_levelLambdaScale = scale; }
+  // psy-rdoq strength (0: off), see DQIntern::Quantizer::usesPsyRdoq
+  void setPsyRdoqStrength ( double strength ) { m_quant.setPsyRdoqStrength( strength ); }
+  double getPsyRdoqStrength() const { return m_quant.getPsyRdoqStrength(); }
 
 private:
   void    xQuantDQ          ( TransformUnit& tu, const CCoeffBuf& srcCoeff, const ComponentID compID, const QpParam& cQP, const double lambda, const Ctx& ctx, TCoeff& absSum, bool enableScalingLists, int* quantCoeff );
@@ -450,6 +463,7 @@ private:
   DQIntern::StateMem  m_state_curr;
   DQIntern::StateMem  m_state_skip;
   DQIntern::RateTablesMemo m_rateTablesMemo;   // after the trellis and state arrays: see RateTablesMemo
+  double              m_levelLambdaScale = 1.0;
 
   // has to be called as a first check, assumes no decision has been made yet!!!
   void( *m_checkAllRdCosts )( const DQIntern::ScanPosType spt, const DQIntern::PQData* pqData, DQIntern::Decisions& decisions, const DQIntern::StateMem& state );
