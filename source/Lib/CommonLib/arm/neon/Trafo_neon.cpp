@@ -674,6 +674,31 @@ static void fastForwardDCT8_B4_neon( const TCoeff* src, TCoeff* dst, int shift, 
   fastForward_B4_neon<fwdButterflyDCT8_4_neon>( g_trCoreDCT8P4[TRANSFORM_FORWARD][0], src, 4, dst, shift, line, iSkipLine );
 }
 
+// the forward matrix of a transform type, N = 4 to 64 points (DST-VII and DCT-VIII: up to 32)
+template<int trType, int N>
+static inline const TMatrixCoeff* fwdMatrix_neon()
+{
+  static_assert( N >= 4 && N <= ( trType == DCT2 ? 64 : 32 ), "no such matrix" );
+  return trType == DST7 ? ( N == 4  ? g_trCoreDST7P4[TRANSFORM_FORWARD][0]
+                          : N == 8  ? g_trCoreDST7P8[TRANSFORM_FORWARD][0]
+                          : N == 16 ? g_trCoreDST7P16[TRANSFORM_FORWARD][0]
+                          :           g_trCoreDST7P32[TRANSFORM_FORWARD][0] )
+       : trType == DCT8 ? ( N == 4  ? g_trCoreDCT8P4[TRANSFORM_FORWARD][0]
+                          : N == 8  ? g_trCoreDCT8P8[TRANSFORM_FORWARD][0]
+                          : N == 16 ? g_trCoreDCT8P16[TRANSFORM_FORWARD][0]
+                          :           g_trCoreDCT8P32[TRANSFORM_FORWARD][0] )
+       :                  ( N == 4  ? g_trCoreDCT2P4[TRANSFORM_FORWARD][0]
+                          : N == 8  ? g_trCoreDCT2P8[TRANSFORM_FORWARD][0]
+                          : N == 16 ? g_trCoreDCT2P16[TRANSFORM_FORWARD][0]
+                          : N == 32 ? g_trCoreDCT2P32[TRANSFORM_FORWARD][0]
+                          :           g_trCoreDCT2P64[TRANSFORM_FORWARD][0] );
+}
+
+// the forward matrix multiply, defined after its int32 adapter fastFwdCore_neon below
+template<unsigned trSize, typename T>
+static void fwdMatMul_neon( const TMatrixCoeff* tc, const T* src, ptrdiff_t srcStride, TCoeff* dst, unsigned line,
+                            unsigned reducedLine, unsigned cutoff, int shift );
+
 template<unsigned trSize>
 static void fastInvCore_neon( const TMatrixCoeff* it, const TCoeff* src, TCoeff* dst, unsigned lines,
                               unsigned reducedLines, unsigned rows, const TCoeff outputMin, const TCoeff outputMax,
@@ -923,24 +948,11 @@ static void fastInverseDCT2_EvenOdd_neon( const TCoeff* src, TCoeff* dst, int sh
   }
 }
 
-// the forward matrix of a transform type, N = 4 to 64 points (DST-VII and DCT-VIII: up to 32)
-template<int trType, int N>
-static inline const TMatrixCoeff* fwdMatrix_neon()
+template<unsigned trSize>
+static void fastFwdCore_neon( const TMatrixCoeff* tc, const TCoeff* src, TCoeff* dst, unsigned line,
+                              unsigned reducedLine, unsigned cutoff, int shift )
 {
-  static_assert( N >= 4 && N <= ( trType == DCT2 ? 64 : 32 ), "no such matrix" );
-  return trType == DST7 ? ( N == 4  ? g_trCoreDST7P4[TRANSFORM_FORWARD][0]
-                          : N == 8  ? g_trCoreDST7P8[TRANSFORM_FORWARD][0]
-                          : N == 16 ? g_trCoreDST7P16[TRANSFORM_FORWARD][0]
-                          :           g_trCoreDST7P32[TRANSFORM_FORWARD][0] )
-       : trType == DCT8 ? ( N == 4  ? g_trCoreDCT8P4[TRANSFORM_FORWARD][0]
-                          : N == 8  ? g_trCoreDCT8P8[TRANSFORM_FORWARD][0]
-                          : N == 16 ? g_trCoreDCT8P16[TRANSFORM_FORWARD][0]
-                          :           g_trCoreDCT8P32[TRANSFORM_FORWARD][0] )
-       :                  ( N == 4  ? g_trCoreDCT2P4[TRANSFORM_FORWARD][0]
-                          : N == 8  ? g_trCoreDCT2P8[TRANSFORM_FORWARD][0]
-                          : N == 16 ? g_trCoreDCT2P16[TRANSFORM_FORWARD][0]
-                          : N == 32 ? g_trCoreDCT2P32[TRANSFORM_FORWARD][0]
-                          :           g_trCoreDCT2P64[TRANSFORM_FORWARD][0] );
+  fwdMatMul_neon<trSize>( tc, src, trSize, dst, line, reducedLine, cutoff, shift );
 }
 
 // The forward matrix multiply: dst[j * line + i] = sum over k of tc[j * trSize + k] * src[i * srcStride + k], rounded
@@ -1066,13 +1078,6 @@ static void fwdMatMul_neon( const TMatrixCoeff* tc, const T* src, ptrdiff_t srcS
       j += 4;
     } while( j != cutoff );
   }
-}
-
-template<unsigned trSize>
-static void fastFwdCore_neon( const TMatrixCoeff* tc, const TCoeff* src, TCoeff* dst, unsigned line,
-                              unsigned reducedLine, unsigned cutoff, int shift )
-{
-  fwdMatMul_neon<trSize>( tc, src, trSize, dst, line, reducedLine, cutoff, shift );
 }
 
 // rows (row0, row0 + 2, ..) of the forward matrix, numRows of them (2 or 4), times the 4 lines' E (even rows) or O
@@ -1271,6 +1276,43 @@ static NO_INLINE void fwdEvenOddLines_neon( const T* src, ptrdiff_t srcStride, T
   fastForwardZeroSkipped( dst, line, reducedLine, cutoff, iSkipLine );
 }
 
+// TCoeffOps::fastFwdPel: the first stage of a 2-D forward transform on the residual itself, with the kernels of the
+// widened block. The residual is int16, so they take the same inputs and give the same results. line is 2 or a multiple
+// of 4; no lines are skipped, and the rows past the cut-off are left as they were.
+static void fastFwdPelDCT2_B2_neon( const Pel* src, ptrdiff_t stride, TCoeff* dst, int shift, int line, int iSkipLine2 )
+{
+  fwdDCT2_B2_neon( src, stride, dst, shift, line, line );
+}
+
+template<int trType, FwdButterfly4Neon butterfly>
+static void fastFwdPel4_neon( const Pel* src, ptrdiff_t stride, TCoeff* dst, int shift, int line, int iSkipLine2 )
+{
+  fastForward_B4_neon<butterfly>( fwdMatrix_neon<trType, 4>(), src, stride, dst, shift, line, 0 );
+}
+
+// DCT-II, 8 to 64 points, as fastForwardDCT2_EvenOdd_neon
+template<int N>
+static void fastFwdPelDCT2_neon( const Pel* src, ptrdiff_t stride, TCoeff* dst, int shift, int line, int iSkipLine2 )
+{
+  const int cutoff = N - iSkipLine2;
+
+  if( line < 4 || cutoff <= 4 )
+  {
+    fwdMatMul_neon<N>( fwdMatrix_neon<DCT2, N>(), src, stride, dst, line, line, cutoff, shift );
+  }
+  else
+  {
+    fwdEvenOddLines_neon<N>( src, stride, dst, shift, line, 0, iSkipLine2 );
+  }
+}
+
+// DST-VII and DCT-VIII, 8 to 32 points: the matrix multiply, as their C kernels through fastFwdCore_2D
+template<int trType, int N>
+static void fastFwdPelMatMul_neon( const Pel* src, ptrdiff_t stride, TCoeff* dst, int shift, int line, int iSkipLine2 )
+{
+  fwdMatMul_neon<N>( fwdMatrix_neon<trType, N>(), src, stride, dst, line, line, N - iSkipLine2, shift );
+}
+
 template<int N>
 static void fastForwardDCT2_EvenOdd_neon( const TCoeff* src, TCoeff* dst, int shift, int line, int iSkipLine, int iSkipLine2 )
 {
@@ -1324,43 +1366,6 @@ static void fwdLfnstNxN_neon( int* src, int* dst, const uint32_t mode, const uin
                               int zeroOutSize )
 {
   fwdLfnstNxN_common<LfnstRowDotsNeon>( src, dst, mode, index, size, zeroOutSize );
-}
-
-// TCoeffOps::fastFwdPel: the first stage of a 2-D forward transform on the residual itself, with the kernels of the
-// widened block. The residual is int16, so they take the same inputs and give the same results. line is 2 or a multiple
-// of 4; no lines are skipped, and the rows past the cut-off are left as they were.
-static void fastFwdPelDCT2_B2_neon( const Pel* src, ptrdiff_t stride, TCoeff* dst, int shift, int line, int iSkipLine2 )
-{
-  fwdDCT2_B2_neon( src, stride, dst, shift, line, line );
-}
-
-template<int trType, FwdButterfly4Neon butterfly>
-static void fastFwdPel4_neon( const Pel* src, ptrdiff_t stride, TCoeff* dst, int shift, int line, int iSkipLine2 )
-{
-  fastForward_B4_neon<butterfly>( fwdMatrix_neon<trType, 4>(), src, stride, dst, shift, line, 0 );
-}
-
-// DCT-II, 8 to 64 points, as fastForwardDCT2_EvenOdd_neon
-template<int N>
-static void fastFwdPelDCT2_neon( const Pel* src, ptrdiff_t stride, TCoeff* dst, int shift, int line, int iSkipLine2 )
-{
-  const int cutoff = N - iSkipLine2;
-
-  if( line < 4 || cutoff <= 4 )
-  {
-    fwdMatMul_neon<N>( fwdMatrix_neon<DCT2, N>(), src, stride, dst, line, line, cutoff, shift );
-  }
-  else
-  {
-    fwdEvenOddLines_neon<N>( src, stride, dst, shift, line, 0, iSkipLine2 );
-  }
-}
-
-// DST-VII and DCT-VIII, 8 to 32 points: the matrix multiply, as their C kernels through fastFwdCore_2D
-template<int trType, int N>
-static void fastFwdPelMatMul_neon( const Pel* src, ptrdiff_t stride, TCoeff* dst, int shift, int line, int iSkipLine2 )
-{
-  fwdMatMul_neon<N>( fwdMatrix_neon<trType, N>(), src, stride, dst, line, line, N - iSkipLine2, shift );
 }
 
 template<>
