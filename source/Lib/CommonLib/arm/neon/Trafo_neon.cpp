@@ -235,20 +235,15 @@ static void fastInverseDCT2_B8_neon( const TCoeff* src, TCoeff* dst, int shift, 
     invDCT2_B8_4lines_neon( iT, paddedSrc, 4, paddedDst, vshift, vmin, vmax );
     memcpy( dst + 8 * j, paddedDst, 8 * ( reducedLine - j ) * sizeof( TCoeff ) );
   }
-
-  if( iSkipLine )
-  {
-    memset( dst + 8 * reducedLine, 0, 8 * iSkipLine * sizeof( TCoeff ) );
-  }
 }
 
 // The 2- and 4-point transforms (TCoeffOps::fastInvDCT2[0..1], fastFwdDCT2[0..1], fastFwdDST7_4, fastFwdDCT8_4). Like
 // their SSE4.1 versions, they take 4 lines at a time, one line per lane, in 32-bit arithmetic as C. The products of the
 // 4-point matrices (entries at most 84) with transform inputs stay far inside int32. C's ( d + add ) >> shift is a
 // rounding shift: vrshlq_s32 by -shift, which needs no add and is the identity when shift is 0, where C's add is 0 as
-// well. The inverse clips to the output range. Both directions clear the skipped lines, as C. Each kernel below takes
-// numLines (1..4) lines: the loop calls it with the constant 4, so the partial loads and stores fold away; the last 1
-// to 3 lines of a call, if any, take one more call that loads and stores only those lines.
+// well. The inverse clips to the output range; it leaves the skipped lines alone, as C, while the forward clears them,
+// as C. Each kernel below takes numLines (1..4) lines: the loop calls it with the constant 4, so the partial loads and
+// stores fold away; the last 1 to 3 lines of a call, if any, take one more call that loads and stores only those lines.
 //
 // The 2-point matrix is { 64, 64 }, { 64, -64 }. C rounds 64 * x by shift, which is x rounded by shift - 6: the 6 zero
 // low bits of 64 * x never change the rounding, and for shift < 6 both are x << ( 6 - shift ). vrshlq_s32 by 6 - shift
@@ -292,11 +287,6 @@ static void fastInverseDCT2_B2_neon( const TCoeff* src, TCoeff* dst, int shift, 
   if( j < reducedLine )
   {
     invDCT2_B2_lines_neon( src + j, line, reducedLine - j, dst + 2 * j, vshift6, vmin, vmax );
-  }
-
-  if( iSkipLine )
-  {
-    memset( dst + 2 * reducedLine, 0, 2 * iSkipLine * sizeof( TCoeff ) );
   }
 }
 
@@ -360,11 +350,6 @@ static void fastInverseDCT2_B4_neon( const TCoeff* src, TCoeff* dst, int shift, 
   if( j < reducedLine )
   {
     invDCT2_B4_lines_neon( iT, src + j, line, reducedLine - j, dst + 4 * j, vshift, vmin, vmax );
-  }
-
-  if( iSkipLine )
-  {
-    memset( dst + 4 * reducedLine, 0, 4 * iSkipLine * sizeof( TCoeff ) );
   }
 }
 
