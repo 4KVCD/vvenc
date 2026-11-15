@@ -570,6 +570,34 @@ double EncSlice::getPsyRdStrength( const VVEncCfg& encCfg, const Slice& slice )
   return encCfg.psyRdStrength( psyPictureScale( slice, PSY_GRAIN_BASE_STRENGTH ) ) * pow( 2.0, dQp / 6.0 );
 }
 
+// The loss the lost-grain term treats as usual for the slice's picture (see PSY_USUAL_LOSS_SCALE_LOW): from the measured
+// loss of its nearest reference picture, which is complete before this picture starts, so the result does not depend
+// on the order the pictures are coded in
+static double psyUsualLoss( const Slice& slice )
+{
+  const Picture* nearest = nullptr;
+  for( int l = 0; l < NUM_REF_PIC_LIST_01; l++ )
+    for( int i = 0; i < slice.numRefIdx[ l ]; i++ )
+    {
+      const Picture* ref = slice.getRefPic( RefPicList( l ), i );
+      if( ref && ref->psyLostShare >= 0.0 && ( !nearest || abs( ref->poc - slice.poc ) < abs( nearest->poc - slice.poc ) ) )
+      {
+        nearest = ref;
+      }
+    }
+  const double lowRate = Clip3( 0.0, 1.0, double( slice.sliceQp - PSY_USUAL_LOSS_QP_LOW ) / ( PSY_USUAL_LOSS_QP_HIGH - PSY_USUAL_LOSS_QP_LOW ) );
+  const double scale   = PSY_USUAL_LOSS_SCALE_LOW + ( PSY_USUAL_LOSS_SCALE_HIGH - PSY_USUAL_LOSS_SCALE_LOW ) * lowRate;
+  return nearest ? std::min( PSY_USUAL_LOSS_MAX, nearest->psyLostShare * scale ) : PSY_USUAL_LOSS_START;
+}
+
+void EncSlice::measurePsyLostShare( Picture& pic ) const
+{
+  if( m_psyRdCost.usePsy() && !pic.psyOrgEnergy[ 0 ].empty() )
+  {
+    pic.psyLostShare = m_psyRdCost.getPsyLostShare( pic, pic.cs->sps->bitDepths[ CH_L ] );
+  }
+}
+
 double EncSlice::getPsyRdoqStrength( const VVEncCfg& encCfg, const Slice& slice )
 {
   return encCfg.psyRdoqStrength( psyPictureScale( slice, 1.0 ) );
@@ -737,6 +765,7 @@ void EncSlice::compressSlice( Picture* pic )
   if( m_psyRdCost.usePsy() && startCtuTsAddr == 0 )
   {
     m_psyRdCost.buildPsyOrgEnergies( *pic, slice->sps->bitDepths[ CH_L ] );
+    pic->psyUsualLoss = psyUsualLoss( *slice );
   }
 
   for( auto* lnRsrc : m_TileLineEncRsrc )

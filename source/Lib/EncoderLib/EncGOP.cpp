@@ -277,6 +277,7 @@ void EncGOP::initPicture( Picture* pic )
   pic->encTime.startTimer();
 
   pic->TLayer = pic->gopEntry->m_temporalId;
+  pic->psyLostShare = -1.0;   // not measured yet (a reused Picture object keeps the last picture's value)
   if( pic->ctsValid )
   {
     if( m_lastCts )
@@ -540,7 +541,9 @@ void EncGOP::xStartPictures( bool lockStepMode, bool fetchOnEveryPass, int maxSt
       const std::list<Picture *>* rcUpdateList = &m_rcUpdateList;
       const VVEncCfg* encCfg = m_pcEncCfg;
       auto isReady = [encCfg, rcUpdateList]( const Picture* cand ) {
-        return ( encCfg->m_ifp || cand->slices[ 0 ]->checkAllRefPicsReconstructed() )
+        // psy-rd reads what its reference pictures measured on their final reconstructions (EncSlice::measurePsyLostShare):
+        // such a picture starts only when they are complete, also with IFP, or its stream would depend on timing
+        return ( ( encCfg->m_ifp && !encCfg->m_psyRdStrengthVal ) || cand->slices[ 0 ]->checkAllRefPicsReconstructed() )
           && ( !encCfg->m_alf || ( !cand->refApsGlobal || cand->refApsGlobal->initalized ) )
           && ( !encCfg->m_rateCap || !encCfg->m_maxParallelFrames || !cand->isSceneCutGOP || (!rcUpdateList->front()->isSceneCutCheckAdjQP && !rcUpdateList->front()->gopEntry->m_isStartOfGop ) )
           ; };

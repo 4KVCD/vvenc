@@ -195,6 +195,7 @@ public:
   static int getLowestInterQP ( const VVEncCfg& encCfg, const int baseQP );
   static double getPsyRdStrength( const VVEncCfg& encCfg, const Slice& slice );
   static double getPsyRdoqStrength( const VVEncCfg& encCfg, const Slice& slice );
+  void          measurePsyLostShare( Picture& pic ) const;
 };
 
 } // namespace vvenc

@@ -161,6 +161,10 @@ struct Picture : public UnitArea
   // psy-rd: how much of the lost-grain term this picture gets, 0 (no grain) to 1 (RdCost::buildPsyOrgEnergies); it
   // also sets the picture's psy-rd and psy-rdoq strength (EncSlice::getPsyRdStrength, getPsyRdoqStrength)
   double               psyGrainShare = 0.0;
+  // psy-rd: the share of the source's band energy this picture's final reconstruction lost (-1: not measured yet), and
+  // the loss the lost-grain term treats as usual while this picture is coded (from its nearest reference picture)
+  double               psyLostShare = -1.0;
+  double               psyUsualLoss = 0.0;
   // psy-rd: the share of the source's fine-band blocks that did not change against the neighbouring source picture
   // (PreProcess::xGetPsyStableShare): animation, graphics and repeated pictures are stable, camera grain is not
   float                psyStableShare = 0.f;

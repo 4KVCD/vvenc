@@ -160,6 +160,7 @@ void EncPicture::finalizeReference( Picture& pic )
     xCopyApsToGlobal( pic );
   }
   m_apsCopiedEarly = false;
+  m_SliceEncoder.measurePsyLostShare( pic );   // after the in-loop filters, before a picture referencing this one starts
 }
 
 // The serial rest of the picture's encoding, which the pictures referencing it do not read.

@@ -477,9 +477,11 @@ Distortion RdCost::getPsyDistortion( const Picture& pic, const CompArea& area, c
       // the band-energy difference and, with PSY_GROUP_WEIGHT, the group-by-group difference (see PSY_GROUPS_8x8)
       const int64_t orgEnergy  = xPsyOrgEnergy( pic, org, area.x + x, area.y + y, x, y, n, shift );
       int64_t       energyDiff = std::abs( orgEnergy - recEnergy );
-      if( recEnergy < orgEnergy && pic.psyDeficitConvexity > 0.0 )   // lost grain: convex in the lost fraction (see PSY_DEFICIT_CONVEXITY)
+      if( recEnergy < orgEnergy && pic.psyDeficitConvexity > 0.0 )   // lost grain: convex beyond the usual loss (see PSY_DEFICIT_CONVEXITY)
       {
-        energyDiff += int64_t( pic.psyDeficitConvexity * double( energyDiff ) * double( energyDiff ) / double( orgEnergy ) + 0.5 );
+        const double lost        = double( energyDiff ) / double( orgEnergy );
+        const double beyondUsual = std::max( 0.0, lost - pic.psyUsualLoss ) / ( 1.0 - pic.psyUsualLoss );
+        energyDiff += int64_t( pic.psyDeficitConvexity * double( energyDiff ) * beyondUsual + 0.5 );
       }
       if( n < 4 )
       {
@@ -510,6 +512,27 @@ int64_t RdCost::getPsyGroupGap( const Picture& pic, const CompArea& area, const 
       }
     }
   return gap;
+}
+
+// The share of the source's 8x8 band energy that the picture's final reconstruction lost: what the pictures referencing
+// it take as their usual loss (see PSY_USUAL_LOSS_SCALE_LOW). Needs the picture's source tables (before finalizePicture).
+double RdCost::getPsyLostShare( const Picture& pic, int bitDepth ) const
+{
+  const CompArea area  = pic.Y();
+  const CPelBuf  org   = pic.getOrigBuf( area );
+  const CPelBuf  rec   = pic.getRecoBuf( area );
+  const int      shift = bitDepth - 8;
+  int64_t        lost  = 0;
+  int64_t        total = 0;
+  for( int y = 0; y + 8 <= int( org.height ); y += 8 )
+    for( int x = 0; x + 8 <= int( org.width ); x += 8 )
+    {
+      const int64_t orgEnergy = xPsyOrgEnergy( pic, org, area.x + x, area.y + y, x, y, 8, shift );
+      const int64_t recEnergy = xPsyEnergy( rec.bufAt( x, y ), rec.stride, 8, shift );
+      total += orgEnergy;
+      lost  += std::max<int64_t>( 0, orgEnergy - recEnergy );
+    }
+  return total ? double( lost ) / double( total ) : 0.0;
 }
 
 int64_t RdCost::getPsyEnergyGap( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const

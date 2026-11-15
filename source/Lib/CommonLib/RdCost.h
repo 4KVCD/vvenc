@@ -141,7 +141,25 @@ static constexpr double PSY_GROUP_WEIGHT = 0.25;
 // strength goes down to PSY_GRAIN_BASE_STRENGTH of its value: the same patchwork, missing grain and pulsing as
 // convexity 2 at full strength with fewer block and structure artifacts and half the growth in bytes per QP
 // (gangster_chase at equal size, 4 rate points).
+// Only the loss beyond the picture's usual loss counts (Picture::psyUsualLoss): where every block has lost much of its
+// grain (4K film at low rates), a factor on the whole loss pushes every block alike (more strokes and block artifacts,
+// and new contrast between the blocks it lifts and those it does not) instead of the ones that fell behind their
+// neighbours. The usual loss of a picture is a scale (below) x the share of the source's band energy that its
+// nearest reference picture lost (measured on that picture's final reconstruction); a picture without references
+// takes PSY_USUAL_LOSS_START (0, 0.3 and 0.5 change the streams by under 2.5 %).
 static constexpr double PSY_DEFICIT_CONVEXITY   = 4.0;
+// The scale follows the slice QP: PSY_USUAL_LOSS_SCALE_LOW up to PSY_USUAL_LOSS_QP_LOW (high rates: the term itself
+// lowers the brush strokes there, so it stays nearly whole), PSY_USUAL_LOSS_SCALE_HIGH from PSY_USUAL_LOSS_QP_HIGH (low
+// rates on 4K film, where the whole-loss term added strokes and block artifacts). The measured loss alone cannot tell
+// the two ends apart: nocturne_grain measures 0.22 at both 7.6 MB and 1.2 MB.
+// Under the tune every picture that has references carries about the same slice QP (flat cascade, --qp + 5 at preset
+// fast), so one scale applies to a whole encode: 1 up to --qp 25, 2 from --qp 31.
+static constexpr double PSY_USUAL_LOSS_SCALE_LOW  = 1.0;
+static constexpr double PSY_USUAL_LOSS_SCALE_HIGH = 2.0;
+static constexpr int    PSY_USUAL_LOSS_QP_LOW     = 30;
+static constexpr int    PSY_USUAL_LOSS_QP_HIGH    = 36;
+static constexpr double PSY_USUAL_LOSS_START      = 0.3;
+static constexpr double PSY_USUAL_LOSS_MAX        = 0.9;
 static constexpr double PSY_GRAIN_BASE_STRENGTH = 0.59375;   // 19 / 32: a value --PsyRD can take
 // On clean video the same term buys grain-like energy the source does not have (wrath_of_man at equal size: brush
 // strokes, patchwork and flicker about doubled). So it scales with the picture's grain floor (the 10th percentile of
@@ -328,6 +346,7 @@ public:
   int64_t       getPsyGroupGap      ( const Picture& pic, const CompArea& area, const CPelBuf& pred, const CPelBuf& resi ) const;
   // the sum over the area's whole 8x8 blocks of | E_org - E_rec | (no strength, lambda or credit): SAO weighs its changes
   int64_t       getPsyEnergyGap     ( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const;
+  double        getPsyLostShare     ( const Picture& pic, int bitDepth ) const;
 
   void          setDistParam        ( DistParam &rcDP, const CPelBuf& org, const Pel* piRefY , int iRefStride, int bitDepth, ComponentID compID, int subShiftMode = 0, int useHadamard = 0 );
   DistParam     setDistParam        ( const CPelBuf& org, const CPelBuf& cur, int bitDepth, DFunc dfunc );
