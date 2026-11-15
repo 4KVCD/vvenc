@@ -45,7 +45,6 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <cstdlib>
-#include <algorithm>
 #include <limits>
 
 #include "CommonDefARM.h"
@@ -1433,8 +1432,8 @@ Distortion xGetSAD_NxN_neon( const DistParam& rcDtParam )
   return xGetSAD_generic_neon( rcDtParam, iWidth );
 }
 
-// Four rows of two samples as one vector: row k in lanes 2 k and 2 k + 1. The rows go in as 32-bit lanes (the NEON
-// loads take any pointer type), two independent halves.
+// Four rows of two samples as one vector: row k in lanes 2 k and 2 k + 1. Each row is read as one 32-bit lane (the
+// casts are deliberate: two samples per lane); rows 0 and 1, and rows 2 and 3, are loaded separately.
 static inline int16x8_t load_s16x2x4( const Pel* src, const ptrdiff_t stride )
 {
   const uint32_t* row0 = reinterpret_cast<const uint32_t*>( src );
@@ -1876,12 +1875,10 @@ struct BvVerticalPart_neon
 
   BvVerticalPart_neon( const int rmvV0, const int rmvV1 )
   {
-    const int rmvV[2] = { rmvV0, rmvV1 };
-    for( int k = 0; k < 2; k++ )
-    {
-      absDiff[k] = vdupq_n_s32( std::abs( rmvV[k] ) );
-      bits[k]    = bvComponentBits_neon( vdupq_n_s32( rmvV[k] ) );
-    }
+    absDiff[0] = vdupq_n_s32( std::abs( rmvV0 ) );
+    absDiff[1] = vdupq_n_s32( std::abs( rmvV1 ) );
+    bits[0]    = bvComponentBits_neon( vdupq_n_s32( rmvV0 ) );
+    bits[1]    = bvComponentBits_neon( vdupq_n_s32( rmvV1 ) );
   }
 
   // the bits with the first predictor where its sum of absolute differences is smaller, else with the second
@@ -1932,7 +1929,10 @@ static void bvBitsLine_neon( const Mv* predictors, const int x0, const int xStep
     {
       unsigned last[4];
       vst1q_u32( last, result );
-      std::copy( last, last + count - i, &bits[i] );
+      for( int k = 0; k < count - i; k++ )
+      {
+        bits[i + k] = last[k];
+      }
     }
   }
 }
