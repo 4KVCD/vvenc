@@ -707,6 +707,7 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   c->m_GOPQPA                                  = -1;
 
   c->m_fga                                     = 0;
+  c->m_fgaStacked                              = false;
   c->m_fgaIntervalLog2                         = -1;
   c->m_fgaStrengthVal                          = VVENC_SET_FGA_STRENGTH(1.0);
 
@@ -1878,7 +1879,7 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
     }
   }
 
-  vvenc_confirmParameter( c, c->m_fga < 0 || c->m_fga > 3, "Film grain analysis (fga) must be 0, 1, 2 or 3!");
+  vvenc_confirmParameter( c, c->m_fga < 0 || c->m_fga > 4, "Film grain analysis (fga) must be 0, 1, 2, 3 or 4!");
   vvenc_confirmParameter( c, c->m_fgaIntervalLog2 < -1 || c->m_fgaIntervalLog2 > 6, "Film grain analysis interval (FgaIntervalLog2) must be -1 (automatic) or 0 to 6!");
   if (c->m_fga)
   {
@@ -1893,6 +1894,14 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
       vvenc_confirmParameter( c, c->m_GOPSize % interval != 0, "Film grain analysis interval (1 << FgaIntervalLog2) must divide the GOP size!");
       vvenc_confirmParameter( c, c->m_LookAhead && interval != c->m_GOPSize, "Film grain analysis interval (FgaIntervalLog2) must be -1 (automatic) or the GOP size with the look-ahead!");
     }
+  }
+  vvenc_confirmParameter( c, c->m_fgaStacked && c->m_fga != 4, "FgaStacked needs film grain analysis without coding (fga 4)!" );
+  if( c->m_fga == 4 )
+  {
+    // the analysis without coding: nothing may wait for coded pictures (ALF's temporal APS, rate control)
+    vvenc_confirmParameter( c, c->m_RCTargetBitrate > 0, "Film grain analysis without coding (fga 4) needs a fixed QP, not a bitrate!" );
+    c->m_alf   = false;
+    c->m_ccalf = false;
   }
 
   vvenc_confirmParameter( c, !autoGop && c->m_numRefPics    != 0,                         "NumRefPics cannot be used if explicit GOP configuration is used!" );

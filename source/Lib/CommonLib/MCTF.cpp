@@ -952,7 +952,10 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
   int dropFramesFront = std::min( std::max(                                          filterIdx - filterFrames, 0 ), dropFrames + 2 );
   int dropFramesBack  = std::min( std::max( static_cast<int>( picFifo.size() ) - 1 - filterIdx - filterFrames, 0 ), dropFrames + 2 );
 
-  if ( isFilterThisFrame || fgaOnly )
+  // --fga 4 codes nothing: of MCTF's work only the film grain analysis's, on the pictures it looks at, is used
+  const bool analysisOnly = m_encCfg->m_fga == 4 && m_isFinalPass;
+
+  if ( ( isFilterThisFrame || fgaOnly ) && ( !analysisOnly || fgaPicture ) )
   {
     bool  useMCTFadaptation = true;
     const bool condAddLevel = useMCTFadaptation && m_area.width >= 1920;
@@ -1085,8 +1088,8 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
       }
     }
 
-    // filter
-    if( isFilterThisFrame && pic->useMCTF )
+    // filter (for the encoding)
+    if( isFilterThisFrame && pic->useMCTF && !analysisOnly )
     {
       fltrBuf.create( m_encCfg->m_internChromaFormat, m_area, 0, MCTF_FRAME_MARGIN );
       filterAndKeepDetail( origBuf, srcFrameInfo, fltrBuf, filterStrength );
@@ -1116,7 +1119,7 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
     if( fgaPicture )
     {
       static constexpr double FGA_FILTER_STRENGTH = 1.5;
-      if( isFilterThisFrame && pic->useMCTF && filterStrength == FGA_FILTER_STRENGTH )
+      if( isFilterThisFrame && pic->useMCTF && filterStrength == FGA_FILTER_STRENGTH && !analysisOnly )
       {
         // the picture filtered for the encoding is exactly the one the analysis needs (from QP 20 on with MCTFLevelTilt
         // off; the tilt raises the upper temporal levels' strength, so for those the analysis filters its own copy)
@@ -1133,6 +1136,10 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
       // temporal residual of the picture and its neighbours, whose motion has just been estimated.
       pic->m_picShared->fgaResidualWeight() = m_encCfg->m_fga >= 2
         ? fgaTemporalResidual( origBuf, pic->poc, picFifo, srcFrameInfo, pic->m_picShared->getFgaResidualBuf() ) : 0;
+    }
+    if( analysisOnly )
+    {
+      return;   // the rest (noise levels, SCC detection, block importance) serves the coding only
     }
 
     if( isFilterThisFrame && ( m_encCfg->hasBlockQpOffsets() || m_encCfg->m_usePerceptQPA || pic->gopEntry->m_isStartOfGop ) )

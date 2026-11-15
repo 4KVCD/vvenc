@@ -207,39 +207,13 @@ private:
   std::vector<int>          m_globalCtuQpVector;
   bool                      m_forceSCC;
 
-  FGAnalyzer              m_fgAnalyzer;                 ///< film grain analysis (--fga)
-
-  // An analysis, run as a thread pool task. The tasks run one after the other in POC order (each waits for the
-  // previous one), because every analysis adds to the statistics of the previous ones.
-  struct FgaTask
-  {
-    EncGOP*        gop       = nullptr;
-    Picture*       pic       = nullptr;
-    int            codingNum = 0;   ///< the picture with whose access unit the result is taken
-    int            startPoc  = std::numeric_limits<int>::min();   ///< the first picture in output order its result is for; written pictures keep theirs
-    bool           sceneCut  = false;   ///< a scene cut lies between the previously analysed picture and this one
-    FilmGrainParam result;
-    WaitCounter    counter;
-  };
-  std::deque<std::unique_ptr<FgaTask>> m_fgaTasks;      ///< analyses whose access unit is not written yet
-  std::unique_ptr<FgaTask>             m_fgaConsumed;   ///< the last consumed task, kept until the next one has run
-  FgaTask*                             m_fgaLast = nullptr;   ///< the last submitted task
-  int                                  m_fgaPrevAnalysedPoc = std::numeric_limits<int>::min();   ///< POC of the last analysed picture
-  // The film grain parameter sets by the POC from which they apply in output order: an analysis applies from the
-  // picture after the previously analysed one, or from a scene cut between them, but never before the picture after
-  // the last written one. The latest few are kept.
-  size_t                    m_fgcParamSets  = 8;   ///< the most kept: two GOPs of analyses and two more, at least 8
-  std::map<int, FilmGrainParam> m_fgcByStartPoc;
-  bool                      m_fgcCompSignalled[ MAX_NUM_COMP ] = { false, false, false };   ///< components present in a parameter set so far
-  // The POCs of the latest access units written in the current coded layer video sequence (more than two GOPs), and
-  // whether a RASL picture carried a film grain SEI since the last other picture; to decide where the SEI is needed.
+  size_t                    m_fgcParamSets  = 8;   ///< the most sets kept per mode: two GOPs of analyses and two more, at least 8
   static constexpr size_t   FGC_SEI_HISTORY = 160;
-  std::set<int>             m_fgcWrittenPocs;
-  bool                      m_fgcRaslSeiPending = false;
-  // The film grain SEI fitted to the grain the coding lost (xScaleToLostGrain): per component, intensity interval and
-  // temporal layer, the interval's summed spectra of the latest LOST_GRAIN_POOL pictures of that layer and the last
-  // cut-offs and scaling factor written; per component and temporal layer, the last cut-off shift. Cleared at every
-  // random access point (--fga 2 and 3).
+
+  // The film grain SEI fitted to the grain the coding lost (xScaleToLostGrain), one state per mode: per component,
+  // intensity interval and temporal layer, the interval's summed spectra of the latest LOST_GRAIN_POOL pictures of that
+  // layer and the last cut-offs and scaling factor written; per component and temporal layer, the last cut-off shift.
+  // Cleared at every random access point (--fga 2 and 3, and --fga 4 with FgaStacked).
   struct LostGrainSums
   {
     double orig[ 256 ] = {};
@@ -258,9 +232,6 @@ private:
   };
   using LostGrainKey = std::tuple<int, int, int, unsigned>;   ///< component, interval lower and upper bound, temporal layer
   static constexpr size_t LOST_GRAIN_POOL = 4;
-  std::map<LostGrainKey, std::deque<LostGrainSums>>        m_lostGrainHistory;
-  std::map<LostGrainKey, LostGrainFitted>                  m_lostGrainFitted;
-  std::map<std::pair<int, unsigned>, std::pair<int, int>> m_lostGrainShift;   ///< (component, layer) -> (dh, dw)
   // With the auto-regressive model (--fga 3): per component, the grain of the filter last signalled (FGAnalyzer::arGrain
   // is computed once per filter, the fit runs for every picture).
   struct ArGrainOfFilter
@@ -268,7 +239,67 @@ private:
     std::vector<int>    filter;   ///< log2 scale factor, then the model values after the scaling factor
     FGAnalyzer::ArGrain grain;
   };
-  ArGrainOfFilter           m_arGrain[ MAX_NUM_COMP ];
+  struct LostGrainState
+  {
+    std::map<LostGrainKey, std::deque<LostGrainSums>>        history;
+    std::map<LostGrainKey, LostGrainFitted>                  fitted;
+    std::map<std::pair<int, unsigned>, std::pair<int, int>> shift;   ///< (component, layer) -> (dh, dw)
+    ArGrainOfFilter                                          arGrain[ MAX_NUM_COMP ];
+  };
+
+  // A film grain analysis mode (--fga 1, 2 or 3): its analyzer and the state of its film grain SEI signalling. --fga 1
+  // to 3 run one mode. --fga 4 runs all three on the same pictures without coding them, for a tool that adds the grain
+  // to an encode made elsewhere (FGA_SEGMENT_MARKER_UUID).
+  struct FgaMode
+  {
+    int        fga = 0;
+    FGAnalyzer analyzer;
+    // The film grain parameter sets by the POC from which they apply in output order: an analysis applies from the
+    // picture after the previously analysed one, or from a scene cut between them, but never before the picture after
+    // the last written one. The latest m_fgcParamSets are kept.
+    std::map<int, FilmGrainParam> byStartPoc;
+    int           prevAnalysedPoc = std::numeric_limits<int>::min();   ///< POC of the last picture this mode analysed
+    bool          compSignalled[ MAX_NUM_COMP ] = { false, false, false };   ///< components present in a parameter set so far
+    // The POCs of the latest access units written in the current coded layer video sequence (FGC_SEI_HISTORY, more
+    // than two GOPs), and whether a RASL picture carried a film grain SEI since the last other picture; to decide
+    // where the SEI is needed.
+    std::set<int> writtenPocs;
+    bool          raslSeiPending = false;
+    LostGrainState lostGrain;   ///< the fit of its SEIs to the grain the coding lost (xScaleToLostGrain)
+  };
+  std::vector<std::unique_ptr<FgaMode>> m_fgaModes;   ///< empty without film grain analysis
+  // --fga 4, the analysis without coding: after each analysis, each mode's parameter set as an SEI message behind a
+  // marker with UUID 393cc818-0a4b-4cef-8e2d-f1605b9577c0 and five data bytes: the mode, then the POC from which the
+  // set applies in output order (big-endian, two's complement; the lowest int for the first set, which applies from
+  // the start). A set applies up to the next one's POC.
+  static constexpr uint8_t FGA_SEGMENT_MARKER_UUID[ ISO_IEC_11578_LEN ] = { 0x39, 0x3c, 0xc8, 0x18, 0x0a, 0x4b, 0x4c, 0xef,
+                                                                            0x8e, 0x2d, 0xf1, 0x60, 0x5b, 0x95, 0x77, 0xc0 };
+  // FgaStacked: added to the mode byte of a set that is one picture's own, fitted to the grain the given encode lost
+  // (the POC is that picture's)
+  static constexpr int FGA_FITTED_TO_ENCODE = 0x80;
+
+  // An analysis, run as a thread pool task. The tasks run one after the other in POC order (each waits for the
+  // previous one), because every analysis adds to the statistics of the previous ones.
+  struct FgaTask
+  {
+    EncGOP*        gop       = nullptr;
+    Picture*       pic       = nullptr;
+    int            codingNum = 0;   ///< the picture with whose access unit the result is taken
+    // One per mode of m_fgaModes. With --fga 4 a mode may skip the picture: --fga 1 has no shot restarts.
+    struct ModeResult
+    {
+      bool           analysed = false;
+      int            startPoc = std::numeric_limits<int>::min();   ///< the first picture in output order the result applies to
+      bool           sceneCut = false;   ///< a scene cut or shot restart lies between the mode's previous analysis and this one
+      FilmGrainParam param;
+    };
+    std::vector<ModeResult> results;
+    WaitCounter    counter;
+  };
+  std::deque<std::unique_ptr<FgaTask>> m_fgaTasks;      ///< analyses whose access unit is not written yet
+  std::unique_ptr<FgaTask>             m_fgaConsumed;   ///< the last consumed task, kept until the next one has run
+  FgaTask*                             m_fgaLast = nullptr;   ///< the last submitted task
+  int                                  m_fgaPrevAnalysedPoc = std::numeric_limits<int>::min();   ///< POC of the last analysed picture
 
 public:
   EncGOP( MsgLog& msglog );
@@ -279,6 +310,9 @@ public:
   void init               ( const VVEncCfg& encCfg, const GOPCfg* gopCfg, RateCtrl& rateCtrl, NoMallocThreadPool* threadPool, bool isPreAnalysis );
   void printOutSummary    ( const bool printMSEBasedSNR, const bool printSequenceMSE, const bool printHexPsnr );
   void getParameterSets   ( AccessUnitList& accessUnit );
+  // --fga 4 with FgaStacked: the lost-grain spectra (FGAnalyzer::lostGrainSpectra) of an input picture, whose planes
+  // continue below the picture with the decoded encode the grain is fitted to, kept in its shared picture data
+  void storeStackedLostGrainSpectra( const vvencYUVBuffer& yuvInBuf, PicShared& picShared ) const;
 
 protected:
   virtual void initPicture    ( Picture* pic );
@@ -331,18 +365,19 @@ private:
   void xWritePicture                  ( Picture& pic, AccessUnitList& au, bool isEncodeLtRef );
   int  xWriteParameterSets            ( Picture& pic, AccessUnitList& accessUnit, HLSWriter& hlsWriter );
   int  xWritePictureSlices            ( Picture& pic, AccessUnitList& accessUnit, HLSWriter& hlsWriter );
-  void xAddFilmGrainParameters       ( const FgaTask& task );
-  const FilmGrainParam& xFilmGrainParametersAt( int poc ) const;
-  SeiFgc xFilmGrainSei                ( const FilmGrainParam& param, ChromaFormat chromaFormat );
-  bool xFilmGrainSeiNeeded           ( const Slice& slice, const SeiFgc& sei, ChromaFormat chromaFormat );
+  void xAddFilmGrainParameters       ( FgaMode& mode, const FilmGrainParam& result, int startPoc );
+  static const FilmGrainParam& xFilmGrainParametersAt( const FgaMode& mode, int poc );
+  SeiFgc xFilmGrainSei                ( const FgaMode& mode, const FilmGrainParam& param, ChromaFormat chromaFormat );
+  bool xFilmGrainSeiNeeded           ( FgaMode& mode, const Slice& slice, const SeiFgc& sei, ChromaFormat chromaFormat );
   bool xFitsLostGrain                ( ) const;
   void xStoreLostGrainSpectra        ( Picture& pic ) const;
-  void xScaleToLostGrain             ( Picture& pic, const Slice& slice, SeiFgc& sei );
-  void xFitLostGrainAr               ( int c, unsigned layer, int bitDepth, int log2ScaleFactor,
-                                       const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm );
-  void xFitLostGrain                 ( int c, unsigned layer, int bitDepth, bool chroma420, int log2ScaleFactor,
-                                       const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm );
+  void xScaleToLostGrain             ( LostGrainState& state, const Picture& pic, const Slice& slice, SeiFgc& sei ) const;
+  void xFitLostGrainAr               ( LostGrainState& state, int c, unsigned layer, int bitDepth, int log2ScaleFactor,
+                                       const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm ) const;
+  void xFitLostGrain                 ( LostGrainState& state, int c, unsigned layer, int bitDepth, bool chroma420, int log2ScaleFactor,
+                                       const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm ) const;
   void xWriteLeadingSEIs              ( Picture& pic, AccessUnitList& accessUnit );
+  void xWriteFilmGrainSegments        ( Picture& pic, AccessUnitList& accessUnit );
   void xWriteTrailingSEIs             ( const Picture& pic, AccessUnitList& accessUnit, std::string& digestStr );
   int  xWriteVPS                      ( AccessUnitList &accessUnit, const VPS *vps, HLSWriter& hlsWriter );
   int  xWriteDCI                      ( AccessUnitList &accessUnit, const DCI *dci, HLSWriter& hlsWriter );
