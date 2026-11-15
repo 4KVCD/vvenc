@@ -1434,8 +1434,10 @@ void EncGOP::xInitPPS(PPS &pps, const SPS &sps) const
   {
     for( int comp = 0; comp < MAX_NUM_COMP; comp++)
     {
-      pps.deblockingFilterBetaOffsetDiv2[comp]  = m_pcEncCfg->m_loopFilterBetaOffsetDiv2[comp];
-      pps.deblockingFilterTcOffsetDiv2[comp]    = m_pcEncCfg->m_loopFilterTcOffsetDiv2[comp];
+      // with psy-rd the offsets go to stock deblocking at low rates (the configured values come back unchanged at
+      // the other rates and without psy-rd)
+      pps.deblockingFilterBetaOffsetDiv2[comp]  = EncSlice::getPsyRateDeblockingOffset( *m_pcEncCfg, m_pcEncCfg->m_loopFilterBetaOffsetDiv2[comp] );
+      pps.deblockingFilterTcOffsetDiv2[comp]    = EncSlice::getPsyRateDeblockingOffset( *m_pcEncCfg, m_pcEncCfg->m_loopFilterTcOffsetDiv2[comp] );
     }
   }
 

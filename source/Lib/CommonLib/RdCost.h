@@ -181,6 +181,52 @@ static constexpr double PSY_STABLE_SHARE_NONE = 0.40;
 static constexpr double PSY_CLEAN_STRENGTH = 0.5;
 static constexpr int    PSY_CLEAN_QP_FULL  = 24;
 static constexpr int    PSY_CLEAN_QP_HALF  = 34;
+// The rate ramp: psy-rd and psy-rdoq code at their whole strength only at high rates, a little under it at medium
+// rates and far under it at low rates. At low rates psy itself, not the QP structure or another setting of the tune,
+// made the picture worse than the default encoder's (Top Gun 4K at 1.3 MB per 10 s: with psy off and stock deblocking
+// the tune matches the default encoder on every defect measure): the fine energy psy keeps there is no longer the
+// source's grain but coding error made anew in every picture.
+// Both strengths are multiplied by s (EncSlice.cpp: psyRateStrength), from q = the QP of the encode's inter pictures
+// before the ramp's own QP offset (psyRateQp: one value per encode at constant QP, so the strength does not change
+// inside a GOP) less the grain delay:
+//   s = 1 up to q = PSY_RATE_QP_FULL,
+//       1 - PSY_RATE_SLOPE / 2 x ( q - PSY_RATE_QP_FULL )^2 / ( PSY_RATE_QP_LINEAR - PSY_RATE_QP_FULL ) up to
+//       q = PSY_RATE_QP_LINEAR, and PSY_RATE_SLOPE less per QP from there, down to 0 (from q = 32.9): at the low rate
+//   psy keeps no real fine detail (Top Gun 4K at 1.3 MB: none of the source's signal in the top octave with or
+//   without psy), only made-up grain over a third of the real coarse detail.
+// The square start keeps the rates just below full strength near it; it meets the straight part with the same slope.
+// Rate compensation: psy at its whole strength costs about 5 QP of rate at low rates (Top Gun 4K: the size of -q 31
+// with psy is that of -q 25.8 without), so a strength that only fell would shrink the encode of a given --qp to a
+// fraction (2.3x from one QP to the next in an earlier form of the ramp) and --qp would no longer step evenly. Every
+// picture of the encode, the I picture included, is therefore coded PSY_RATE_QP_GAIN x ( 1 - s ) below its QP
+// (Picture::psyRateQpOffset, through the fractional picture QP): the bytes psy no longer spends go to a finer
+// quantiser, which keeps real detail, and each --qp keeps about the size it has at the whole strength.
+// The coded QP must still rise with --qp: its slope is 1 - PSY_RATE_QP_GAIN x PSY_RATE_SLOPE = 0.4 on the straight
+// part, where it is lowest. That bound is why the gain is 4, not the whole 5 QP, and the slope 0.15.
+// Heavier grain hides more of the same error and is itself coded down to a larger quantiser step, so the ramp starts
+// later for it: the grain delay is PSY_RATE_QP_PER_GRAIN_DOUBLING for each doubling of the picture's grain level
+// (Picture::psyGrainLevel, the lowest of the picture and its reference pictures) above PSY_RATE_GRAIN_LEVEL, at most
+// PSY_RATE_GRAIN_DELAY_MAX. Top Gun (level under 48 on nine tenths of the cut) has no delay, nocturne_grain (86 to 92)
+// 2.9 to 3.3 QP.
+// The points the constants were set on are the full-strength view encodes, whose sizes the QP offset keeps close. The
+// ramp 5 QP higher (whole strength up to q = 30.5) still looked too strong at low rates when viewed, so it starts 5 QP
+// lower: Top Gun 4K at inter QP 28 / 32 / 36 (high / medium / low) -> s 0.74 / 0.14 / 0; nocturne_grain at 33 / 36 /
+// 39 less its delay of about 3 -> 0.44 / 0 / 0.
+// The deblocking offsets follow the same ramp (EncSlice::getPsyRateDeblockingOffset): the configured ones (the tune's
+// -3) from s = PSY_RATE_DEBLOCK_TUNED upwards, stock deblocking (0) up to s = PSY_RATE_DEBLOCK_STOCK, rounded between.
+// Stock deblocking takes the low rate's blocks and shifting down to the default encoder's level; where psy is strong it
+// costs brush strokes (Top Gun at slice QP 32 with psy at its whole strength: +29 %), so the tune's offsets stay there.
+// With rate control s follows each picture's QP, and there is neither a QP offset (the rate control spends the bytes
+// a lower strength saves itself) nor the deblocking ramp.
+static constexpr double PSY_RATE_QP_FULL               = 25.5;
+static constexpr double PSY_RATE_QP_LINEAR             = 27.0;
+static constexpr double PSY_RATE_SLOPE                 = 0.15;
+static constexpr double PSY_RATE_QP_GAIN               = 4.0;
+static constexpr double PSY_RATE_GRAIN_LEVEL           = 52.0;
+static constexpr double PSY_RATE_QP_PER_GRAIN_DOUBLING = 4.0;
+static constexpr double PSY_RATE_GRAIN_DELAY_MAX       = 4.0;
+static constexpr double PSY_RATE_DEBLOCK_TUNED         = 0.75;
+static constexpr double PSY_RATE_DEBLOCK_STOCK         = 0.25;
 
 struct PsyGroupMasks
 {

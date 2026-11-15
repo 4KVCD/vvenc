@@ -161,6 +161,14 @@ struct Picture : public UnitArea
   // psy-rd: how much of the lost-grain term this picture gets, 0 (no grain) to 1 (RdCost::buildPsyOrgEnergies); it
   // also sets the picture's psy-rd and psy-rdoq strength (EncSlice::getPsyRdStrength, getPsyRdoqStrength)
   double               psyGrainShare = 0.0;
+  // psy-rd: the source's grain level, the median of its 8x8 band energies (RdCost::buildPsyOrgEnergies; 0: no block
+  // with energy), and the factor on the picture's psy-rd and psy-rdoq strengths at medium and low rates
+  // (RdCost.h: PSY_RATE_QP_FULL; 1: whole strength)
+  double               psyGrainLevel = 0.0;
+  double               psyRateStrength = 1.0;
+  // psy-rd: the QP offset (0 or negative) the picture is coded with where the rate ramp lowers the strength
+  // (RdCost.h: PSY_RATE_QP_GAIN); the psy strengths read the picture's QP without it
+  double               psyRateQpOffset = 0.0;
   // psy-rd: the share of the source's band energy this picture's final reconstruction lost (-1: not measured yet), and
   // the loss the lost-grain term treats as usual while this picture is coded (from its nearest reference picture)
   double               psyLostShare = -1.0;

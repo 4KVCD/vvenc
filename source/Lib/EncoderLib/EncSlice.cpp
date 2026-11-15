@@ -315,6 +315,9 @@ void EncSlice::init( const VVEncCfg& encCfg,
 }
 
 
+static double psyRateStrength( const VVEncCfg& encCfg, const Slice& slice );
+static double psyRateQpOffset( double rateStrength );
+
 void EncSlice::initPic( Picture* pic )
 {
   Slice* slice = pic->cs->slice;
@@ -332,8 +335,29 @@ void EncSlice::initPic( Picture* pic )
   const SliceType cabacTableIdx = ! slice->pps->cabacInitPresent || slice->pendingRasInit ? slice->sliceType : m_encCABACTableIdx;
   slice->encCABACTableIdx = cabacTableIdx;
 
+  // psy-rd: the source's energies and grain level and, from them, the rate ramp's strength and QP offset, once per
+  // picture, before its QP is set. At constant QP the strength comes from the configured QP, never from the QP the
+  // offset lowered; with rate control it follows the picture's QP, so it is set after that, and there is no offset
+  // (the rate control spends the bytes a lower strength saves itself).
+  const bool psy         = m_psyRdCost.usePsy();
+  const bool psyQpOffset = psy && m_pcEncCfg->m_RCTargetBitrate == 0 && m_pcEncCfg->m_costMode != VVENC_COST_LOSSLESS_CODING;
+  if( psy )
+  {
+    m_psyRdCost.buildPsyOrgEnergies( *pic, slice->sps->bitDepths[ CH_L ] );
+  }
+  if( psyQpOffset )
+  {
+    pic->psyRateStrength = psyRateStrength( *m_pcEncCfg, *slice );
+  }
+  pic->psyRateQpOffset = psyQpOffset ? psyRateQpOffset( pic->psyRateStrength ) : 0.0;
+
   // set QP and lambda values
   xInitSliceLambdaQP( slice );
+
+  if( psy && ! psyQpOffset )
+  {
+    pic->psyRateStrength = psyRateStrength( *m_pcEncCfg, *slice );
+  }
 
   // Worker threads apply this state to their CU encoders when they reach the picture's CTUs. The id
   // tells pictures apart, also when this slice encoder is reused for the next picture.
@@ -368,6 +392,13 @@ void EncSlice::xInitSliceLambdaQP( Slice* slice )
   const bool rcp = (m_pcEncCfg->m_RCTargetBitrate > 0 && slice->pic->picInitialQP >= 0); // 2nd pass
   int  iQP = Clip3 (-slice->sps->qpBDOffset[CH_L], MAX_QP, slice->pic->picInitialQP); // RC start QP
   double dQP     = (rcp ? (double) slice->pic->picInitialQP : xGetQPForPicture (slice));
+
+  // psy-rd's rate ramp codes the picture below its QP where it lowers the psy strength (RdCost.h: PSY_RATE_QP_GAIN);
+  // the offset is fractional and goes the way of a fractional --qp below. Without an offset dQP is not touched.
+  if (slice->pic->psyRateQpOffset < 0.0)
+  {
+    dQP = std::max<double> (-slice->sps->qpBDOffset[CH_L], dQP + slice->pic->psyRateQpOffset);
+  }
 
   // A fractional QP gives a fractional picture QP. With QPA, its integer part sets the slice QP and lambda as for an
   // integer QP, and its fraction raises the CTUs whose activity-based QP lies closest to the next integer, see
@@ -543,8 +574,117 @@ static double psyPictureScale( const Slice& slice, double grainScale )
 {
   const double grainShare   = slice.pic->psyGrainShare;
   const double lowRateScale = PSY_CLEAN_STRENGTH + ( grainScale - PSY_CLEAN_STRENGTH ) * grainShare;
-  const double highRate     = Clip3( 0.0, 1.0, double( PSY_CLEAN_QP_HALF - slice.sliceQp ) / ( PSY_CLEAN_QP_HALF - PSY_CLEAN_QP_FULL ) );
+  // the rate is read from the picture's QP without the rate ramp's QP offset, as the ramp itself reads it
+  const double rateQp       = slice.sliceQp - slice.pic->psyRateQpOffset;
+  const double highRate     = Clip3( 0.0, 1.0, ( PSY_CLEAN_QP_HALF - rateQp ) / ( PSY_CLEAN_QP_HALF - PSY_CLEAN_QP_FULL ) );
   return lowRateScale + ( 1.0 - grainShare ) * ( 1.0 - PSY_CLEAN_STRENGTH ) * highRate;
+}
+
+// The QP the rate ramp (RdCost.h: PSY_RATE_QP_FULL) reads as the encode's rate: the QP of the GOP's least offset inter
+// pictures before the ramp's own QP offset, the same for every picture of a constant-QP encode (the I picture
+// included), so the ramp sets one strength per encode and the 2^(dQP/6) factor of getPsyRdStrength alone follows the QP
+// structure inside the GOP.
+static double psyRateQp( const VVEncCfg& encCfg )
+{
+  return EncSlice::getLowestInterQP( encCfg, encCfg.m_QP ) + encCfg.m_QPFraction;
+}
+
+// With rate control the picture's distance from its place in the GOP's QP structure is added: there the picture QPs
+// are what follows the rate.
+static double psyRateQp( const VVEncCfg& encCfg, const Slice& slice )
+{
+  double qp = psyRateQp( encCfg );
+  if( encCfg.m_RCTargetBitrate > 0 )
+  {
+    qp += slice.sliceQp - EncSlice::getCascadeQP( encCfg, *slice.pic->gopEntry, slice.isIntra(), encCfg.m_QP, slice.sps->qpBDOffset[ CH_L ] );
+  }
+  return qp;
+}
+
+// The grain level the rate ramp reads for the slice's picture: the lowest of its own and its reference pictures'
+// levels. Where the source is itself an encode the level changes from picture to picture with that encode's picture
+// types (Top Gun: about +35 % on every 6th picture); the lowest level leaves those pictures out, so the strength does
+// not jump on single pictures, and a scene with heavier grain still counts once its references lie inside it. The
+// reference pictures' levels are from the source, so the result does not depend on the order the pictures are coded in.
+static double psyNeighbourhoodGrainLevel( const Slice& slice )
+{
+  double level = slice.pic->psyGrainLevel;
+  for( int l = 0; l < NUM_REF_PIC_LIST_01; l++ )
+    for( int i = 0; i < slice.numRefIdx[ l ]; i++ )
+    {
+      if( const Picture* ref = slice.getRefPic( RefPicList( l ), i ) )
+      {
+        level = std::min( level, ref->psyGrainLevel );
+      }
+    }
+  return level;
+}
+
+// How many QP later the rate ramp starts for a grain level (see PSY_RATE_QP_PER_GRAIN_DOUBLING)
+static double psyRateGrainDelay( double grainLevel )
+{
+  return grainLevel > PSY_RATE_GRAIN_LEVEL
+           ? std::min( PSY_RATE_GRAIN_DELAY_MAX, PSY_RATE_QP_PER_GRAIN_DOUBLING * log2( grainLevel / PSY_RATE_GRAIN_LEVEL ) )
+           : 0.0;
+}
+
+// The rate ramp: exactly 1 up to PSY_RATE_QP_FULL, a square fall up to PSY_RATE_QP_LINEAR that
+// arrives there with the slope PSY_RATE_SLOPE, then a straight fall of that slope down to 0
+static double psyRateRamp( double delayedRateQp )
+{
+  if( delayedRateQp <= PSY_RATE_QP_FULL )
+  {
+    return 1.0;
+  }
+  const double squareSpan = PSY_RATE_QP_LINEAR - PSY_RATE_QP_FULL;
+  const double squareFall = 0.5 * PSY_RATE_SLOPE * squareSpan;   // 1 - s at PSY_RATE_QP_LINEAR
+  if( delayedRateQp <= PSY_RATE_QP_LINEAR )
+  {
+    const double position = ( delayedRateQp - PSY_RATE_QP_FULL ) / squareSpan;
+    return 1.0 - squareFall * position * position;
+  }
+  return std::max( 0.0, 1.0 - squareFall - PSY_RATE_SLOPE * ( delayedRateQp - PSY_RATE_QP_LINEAR ) );
+}
+
+// The factor s on the psy-rd and psy-rdoq strengths of the slice's picture (see PSY_RATE_QP_FULL)
+static double psyRateStrength( const VVEncCfg& encCfg, const Slice& slice )
+{
+  const double grainDelay = psyRateGrainDelay( psyNeighbourhoodGrainLevel( slice ) );
+  return psyRateRamp( psyRateQp( encCfg, slice ) - grainDelay );
+}
+
+// The QP offset a picture of rate strength s is coded with: -PSY_RATE_QP_GAIN x ( 1 - s ), exactly 0 at the whole
+// strength.
+static double psyRateQpOffset( double rateStrength )
+{
+  return rateStrength < 1.0 ? -PSY_RATE_QP_GAIN * ( 1.0 - rateStrength ) : 0.0;
+}
+
+// A psy strength under the rate ramp. At the whole strength the value is handed on untouched, not multiplied by 1:
+// the streams of the rates the ramp leaves alone stay byte-identical by construction.
+static double psyRateScaled( double strength, const Slice& slice )
+{
+  const double rateStrength = slice.pic->psyRateStrength;
+  return rateStrength < 1.0 ? strength * rateStrength : strength;
+}
+
+// A deblocking offset (div 2) under the rate ramp: the configured one from s = PSY_RATE_DEBLOCK_TUNED upwards, stock
+// deblocking (0) up to s = PSY_RATE_DEBLOCK_STOCK, rounded between. The offsets are written once, in the PPS, before
+// any picture is read: s is the ramp's value for the encode's rate QP without grain delay.
+// With rate control the rate QP is not known when the PPS is written: the configured offsets stay.
+int EncSlice::getPsyRateDeblockingOffset( const VVEncCfg& encCfg, int configuredOffsetDiv2 )
+{
+  if( ! encCfg.m_psyRdStrengthVal || encCfg.m_RCTargetBitrate > 0 )
+  {
+    return configuredOffsetDiv2;
+  }
+  const double rateStrength = psyRateRamp( psyRateQp( encCfg ) );
+  if( rateStrength >= PSY_RATE_DEBLOCK_TUNED )
+  {
+    return configuredOffsetDiv2;
+  }
+  const double tunedShare = std::max( 0.0, rateStrength - PSY_RATE_DEBLOCK_STOCK ) / ( PSY_RATE_DEBLOCK_TUNED - PSY_RATE_DEBLOCK_STOCK );
+  return int( lround( configuredOffsetDiv2 * tunedShare ) );
 }
 
 // The psy-rd strength of a slice. The psy-rd cost is strength x sqrt(lambda) x |energy change| (as x265), so on a picture
@@ -556,6 +696,7 @@ static double psyPictureScale( const Slice& slice, double grainScale )
 // With rate control, whose picture QPs move with the rate, dQP is the picture's offset in the GOP's QP structure (the QP
 // cascade, or 0 for every inter picture with FlatInterQP) at the rate control's base QP, as at constant QP: the strength
 // then follows the structure the first pass coded with, not rate control's corrections.
+// At medium and low rates the whole strength falls with the rate ramp (Picture::psyRateStrength).
 double EncSlice::getPsyRdStrength( const VVEncCfg& encCfg, const Slice& slice )
 {
   double dQp = 0.0;
@@ -564,10 +705,12 @@ double EncSlice::getPsyRdStrength( const VVEncCfg& encCfg, const Slice& slice )
     const double pictureQp = encCfg.m_RCTargetBitrate > 0
                                ? getCascadeQP( encCfg, *slice.pic->gopEntry, false, encCfg.m_QP, slice.sps->qpBDOffset[ CH_L ] )
                                : slice.pic->lambdaQP;
-    const double lowestInterQp = getLowestInterQP( encCfg, encCfg.m_QP ) + encCfg.m_QPFraction;
+    // at constant QP the picture's QP holds the rate ramp's QP offset, as the lowest inter QP of its GOP does
+    const double lowestInterQp = getLowestInterQP( encCfg, encCfg.m_QP ) + encCfg.m_QPFraction
+                                 + ( encCfg.m_RCTargetBitrate > 0 ? 0.0 : slice.pic->psyRateQpOffset );
     dQp = std::max( 0.0, pictureQp - lowestInterQp );
   }
-  return encCfg.psyRdStrength( psyPictureScale( slice, PSY_GRAIN_BASE_STRENGTH ) ) * pow( 2.0, dQp / 6.0 );
+  return psyRateScaled( encCfg.psyRdStrength( psyPictureScale( slice, PSY_GRAIN_BASE_STRENGTH ) ) * pow( 2.0, dQp / 6.0 ), slice );
 }
 
 // The loss the lost-grain term treats as usual for the slice's picture (see PSY_USUAL_LOSS_SCALE_LOW): from the measured
@@ -600,7 +743,7 @@ void EncSlice::measurePsyLostShare( Picture& pic ) const
 
 double EncSlice::getPsyRdoqStrength( const VVEncCfg& encCfg, const Slice& slice )
 {
-  return encCfg.psyRdoqStrength( psyPictureScale( slice, 1.0 ) );
+  return psyRateScaled( encCfg.psyRdoqStrength( psyPictureScale( slice, 1.0 ) ), slice );
 }
 
 double EncSlice::xGetQPForPicture( const Slice* slice )
@@ -761,10 +904,10 @@ void EncSlice::compressSlice( Picture* pic )
     cs.initStructData( slice->sliceQp );
   }
 
-  // once per picture (its first slice), before any CTU task and before the SAO set-up below reads the picture's psy strength
+  // once per picture (its first slice), before any CTU task (the source's energies and the rate strength are set in
+  // initPic)
   if( m_psyRdCost.usePsy() && startCtuTsAddr == 0 )
   {
-    m_psyRdCost.buildPsyOrgEnergies( *pic, slice->sps->bitDepths[ CH_L ] );
     pic->psyUsualLoss = psyUsualLoss( *slice );
   }
 

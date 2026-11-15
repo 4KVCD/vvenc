@@ -440,6 +440,23 @@ static void buildPsyEdgeGate( Picture& pic, const CPelBuf& org, int gridW, int g
     }
 }
 
+// The median of a histogram of numBlocks energies (the last bin holds everything from 255), placed inside its bin by
+// linear interpolation so that it moves smoothly from picture to picture; 0 without blocks
+static double psyMedianEnergy( const int histogram[256], int numBlocks )
+{
+  if( numBlocks == 0 )
+  {
+    return 0.0;
+  }
+  const double half = 0.5 * numBlocks;
+  int energy = 0, numBelow = 0;
+  while( energy < 255 && numBelow + histogram[energy] < half )
+  {
+    numBelow += histogram[energy++];
+  }
+  return energy + ( half - numBelow ) / histogram[energy];
+}
+
 // The source side of the psy distortion is the same for every candidate at a position, so its energies are computed
 // once per picture, on the 4-sample grid every psy block starts on (coding areas start on it; blocks are 4 or 8 apart).
 // 8x8 blocks crossing the right or bottom picture edge are never looked up: their entries stay 0.
@@ -523,6 +540,10 @@ void RdCost::buildPsyOrgEnergies( Picture& pic, int bitDepth ) const
   const double termShare  = numBlocks ? grainShare * changeShare : 0.0;
   pic.psyGrainShare       = termShare;
   pic.psyDeficitConvexity = PSY_DEFICIT_CONVEXITY * termShare;
+  // The picture's grain level, for the rate ramp's grain delay (see PSY_RATE_QP_FULL): the median, not the floor,
+  // which moves twice as much from picture to picture where the source is itself an encode (Top Gun: every 6th
+  // picture carries more grain)
+  pic.psyGrainLevel       = psyMedianEnergy( histogram, numBlocks );
 }
 
 // the source's energy of the n x n block at picture position ( x, y ), from the picture's table; ISP sub-partitions
