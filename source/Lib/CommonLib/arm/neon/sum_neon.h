@@ -91,6 +91,23 @@ static inline uint16x4_t vvenc_vsqadd_u16( uint16x4_t a, int16x4_t b )
 #endif
 }
 
+// lane-wise 64-bit equality: all ones or all zeros per lane (armv7 has no 64-bit compare: both 32-bit halves equal)
+static inline uint64x2_t vvenc_vceqq_u64( uint64x2_t a, uint64x2_t b )
+{
+#if REAL_TARGET_AARCH64
+  return vceqq_u64( a, b );
+#else
+  const uint32x4_t eq = vceqq_u32( vreinterpretq_u32_u64( a ), vreinterpretq_u32_u64( b ) );
+  return vreinterpretq_u64_u32( vandq_u32( eq, vrev64q_u32( eq ) ) );
+#endif
+}
+
+// true when either lane of the 64-bit compare mask v is set (its low halves, narrowed, as one 64-bit value)
+static inline bool any_lane_set_u64x2( const uint64x2_t v )
+{
+  return vget_lane_u64( vreinterpret_u64_u32( vmovn_u64( v ) ), 0 ) != 0;
+}
+
 static inline int16_t horizontal_add_s16x8( const int16x8_t a )
 {
 #if REAL_TARGET_AARCH64
