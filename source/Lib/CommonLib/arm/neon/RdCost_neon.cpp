@@ -1308,6 +1308,90 @@ Distortion xGetSAD_NxN_neon( const DistParam& rcDtParam )
   return xGetSAD_generic_neon( rcDtParam, iWidth );
 }
 
+// Four rows of two samples as one vector: row k in lanes 2 k and 2 k + 1. Each row is read as one 32-bit lane (the
+// casts are deliberate: two samples per lane); rows 0 and 1, and rows 2 and 3, are loaded separately.
+static inline int16x8_t load_s16x2x4( const Pel* src, const ptrdiff_t stride )
+{
+  const uint32_t* row0 = reinterpret_cast<const uint32_t*>( src );
+  const uint32_t* row1 = reinterpret_cast<const uint32_t*>( src + stride );
+  const uint32_t* row2 = reinterpret_cast<const uint32_t*>( src + 2 * stride );
+  const uint32_t* row3 = reinterpret_cast<const uint32_t*>( src + 3 * stride );
+  const uint32x2_t rows01 = vld1_lane_u32( row1, vld1_dup_u32( row0 ), 1 );
+  const uint32x2_t rows23 = vld1_lane_u32( row3, vld1_dup_u32( row2 ), 1 );
+  return vreinterpretq_s16_u32( vcombine_u32( rows01, rows23 ) );
+}
+
+// DF_SSE2 with the arithmetic of xGetSSE_NxN_SIMD<2> at SSE4.1 (what Arm builds ran through SIMDe): four rows per
+// vector, the differences in 16 bits, their squares summed in 32 bits (wrapping), the rows left over summed in scalar
+// code, and the 32-bit sum, as an int, added to them before the shift.
+static Distortion xGetSSE2_neon( const DistParam& rcDtParam )
+{
+  const Pel*      org       = rcDtParam.org.buf;
+  const Pel*      cur       = rcDtParam.cur.buf;
+  const int       rows      = rcDtParam.org.height;
+  const ptrdiff_t orgStride = rcDtParam.org.stride;
+  const ptrdiff_t curStride = rcDtParam.cur.stride;
+  const uint32_t  shift     = DISTORTION_PRECISION_ADJUSTMENT( rcDtParam.bitDepth ) << 1;
+
+  // the squares into 32-bit lanes, rows 0 and 1 of each four into acc0, rows 2 and 3 into acc1 (two independent
+  // chains): only the sum of all lanes mod 2^32 is used, which neither this split nor _mm_madd_epi16's pairing changes
+  int32x4_t acc0 = vdupq_n_s32( 0 );
+  int32x4_t acc1 = vdupq_n_s32( 0 );
+  int       y    = 0;
+  for( ; y + 4 <= rows; y += 4, org += 4 * orgStride, cur += 4 * curStride )
+  {
+    const int16x8_t diff = vsubq_s16( load_s16x2x4( org, orgStride ), load_s16x2x4( cur, curStride ) );
+    acc0 = vmlal_s16( acc0, vget_low_s16( diff ), vget_low_s16( diff ) );
+    acc1 = vmlal_s16( acc1, vget_high_s16( diff ), vget_high_s16( diff ) );
+  }
+  const int32x4_t acc = vaddq_s32( acc0, acc1 );
+
+  Distortion sum = 0;
+  for( ; y < rows; y++, org += orgStride, cur += curStride )
+  {
+    const int diff0 = org[0] - cur[0];
+    const int diff1 = org[1] - cur[1];
+    sum += diff0 * diff0 + diff1 * diff1;
+  }
+  const int lanes = int( horizontal_add_u32x4( vreinterpretq_u32_s32( acc ) ) );
+  return ( sum + lanes ) >> shift;
+}
+
+// DF_SAD2 as xGetSAD2_SIMD: the absolute differences of four rows per vector, summed over all rows (no early exit,
+// like the other SIMD SADs), subShift rows apart; the rows left over in scalar code.
+static Distortion xGetSAD2_neon( const DistParam& rcDtParam )
+{
+  CHECKD( rcDtParam.org.width != 2, "Invalid width" );
+  CHECKD( rcDtParam.applyWeight, "Weighted SAD is not supported" );
+
+  const Pel*      org       = rcDtParam.org.buf;
+  const Pel*      cur       = rcDtParam.cur.buf;
+  const int       subShift  = rcDtParam.subShift;
+  const ptrdiff_t orgStride = rcDtParam.org.stride << subShift;
+  const ptrdiff_t curStride = rcDtParam.cur.stride << subShift;
+  const int       rows      = rcDtParam.org.height >> subShift;
+
+  CHECKD( rows > 128, "Exceeded MAX_CU_SIZE equal to 128!" );
+  CHECKD( rcDtParam.bitDepth > 10, "Only bit-depths of up to 10 bits supported!" );
+
+  // 16-bit lanes: each takes one row's difference per four rows, at most 32 of them, below 2048 at up to 10 bits (the
+  // motion search also compares 2 * org - pred, -1023 .. 2046, with predictions), and 32 * 2047 < 65536
+  uint16x8_t acc = vdupq_n_u16( 0 );
+  int        y   = 0;
+  for( ; y + 4 <= rows; y += 4, org += 4 * orgStride, cur += 4 * curStride )
+  {
+    acc = vvenc_vabaq_s16( acc, load_s16x2x4( org, orgStride ), load_s16x2x4( cur, curStride ) );
+  }
+  Distortion sum = horizontal_add_long_u16x8( acc );
+  for( ; y < rows; y++, org += orgStride, cur += curStride )
+  {
+    sum += abs( org[0] - cur[0] ) + abs( org[1] - cur[1] );
+  }
+
+  sum <<= subShift;
+  return sum >> DISTORTION_PRECISION_ADJUSTMENT( rcDtParam.bitDepth );
+}
+
 Distortion xGetSAD_neon( const DistParam& rcDtParam )
 {
   return xGetSAD_generic_neon( rcDtParam, rcDtParam.org.width );
@@ -1625,6 +1709,8 @@ void RdCost::_initRdCostARM<NEON>()
   m_afpDistortFunc[0][DF_HAD128_fast] = xGetHADs_fast_neon<128>;
 
   m_afpDistortFunc[0][DF_SAD] = xGetSAD_neon;
+  m_afpDistortFunc[0][DF_SAD2] = xGetSAD2_neon;
+  m_afpDistortFunc[0][DF_SSE2] = xGetSSE2_neon;
   m_afpDistortFunc[0][DF_SAD4] = xGetSAD_NxN_neon<4>;
   m_afpDistortFunc[0][DF_SAD8] = xGetSAD_NxN_neon<8>;
   m_afpDistortFunc[0][DF_SAD16] = xGetSAD_NxN_neon<16>;
