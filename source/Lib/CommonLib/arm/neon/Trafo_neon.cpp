@@ -300,7 +300,7 @@ static ALWAYS_INLINE void invDCT2_B2_lines_neon( const TCoeff* src, int line, in
 static void fastInverseDCT2_B2_neon( const TCoeff* src, TCoeff* dst, int shift, int line, int iSkipLine, int iSkipLine2,
                                      const TCoeff outputMinimum, const TCoeff outputMaximum )
 {
-  CHECKD( g_trCoreDCT2P2[TRANSFORM_INVERSE][0][0] != 64 || g_trCoreDCT2P2[TRANSFORM_INVERSE][0][2] != 64,
+  CHECKD( g_trCoreDCT2P2[TRANSFORM_INVERSE][0][0] != 64 || g_trCoreDCT2P2[TRANSFORM_INVERSE][1][0] != 64,
           "unexpected DCT-II coefficients" );
   const int32x4_t vshift6     = vdupq_n_s32( 6 - shift );
   const int32x4_t vmin        = vdupq_n_s32( outputMinimum );
@@ -411,7 +411,7 @@ static ALWAYS_INLINE void fwdDCT2_B2_lines_neon( const TCoeff* src, int numLines
 
 static void fastForwardDCT2_B2_neon( const TCoeff* src, TCoeff* dst, int shift, int line, int iSkipLine, int iSkipLine2 )
 {
-  CHECKD( g_trCoreDCT2P2[TRANSFORM_FORWARD][0][0] != 64 || g_trCoreDCT2P2[TRANSFORM_FORWARD][0][2] != 64,
+  CHECKD( g_trCoreDCT2P2[TRANSFORM_FORWARD][0][0] != 64 || g_trCoreDCT2P2[TRANSFORM_FORWARD][1][0] != 64,
           "unexpected DCT-II coefficients" );
   const int32x4_t vshift6     = vdupq_n_s32( 6 - shift );
   const int       reducedLine = line - iSkipLine;
