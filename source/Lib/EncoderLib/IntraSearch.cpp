@@ -1563,6 +1563,7 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID compI
   {
     const QpParam cQP = lumaQP ? *lumaQP : QpParam( tu, compID );
     m_pcTrQuant->transformNxN(tu, compID, cQP, uiAbsSum, m_CABACEstimator->getCtx(), loadTr, lfnstPrimary);
+    bool resiOfLevels = false;   // piResi already holds the inverse transform of the levels in the TU
 
     // psy-rdoq keeps levels so that the I picture keeps the source's fine texture. In a large transform a few kept levels
     // are long cosines: strokes, not grain, which every picture predicted from this one inherits. So its levels stay only
@@ -1579,8 +1580,8 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID compI
       m_pcTrQuant->requantLumaWithoutPsyRdoq( tu, cQP, plainAbsSum, m_CABACEstimator->getCtx(), loadTr );
       plain.save( tu, plainAbsSum );
 
-      // each result's distance to the source; the inverse transforms overwrite the residual, which the code below
-      // computes again from the chosen levels
+      // each result's distance to the source; the inverse transforms overwrite the residual: psy-rdoq's is left in it,
+      // the plain one is computed again below when it is chosen
       int64_t plainGap;
       if( plain.absSum > 0 )
       {
@@ -1597,7 +1598,8 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID compI
 
       if( psyGap < plainGap )
       {
-        uiAbsSum = withPsy.absSum;   // psy-rdoq's levels are in the TU
+        uiAbsSum     = withPsy.absSum;   // psy-rdoq's levels are in the TU, their residual in piResi
+        resiOfLevels = true;
       }
       else
       {
@@ -1616,7 +1618,10 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID compI
     //--- inverse transform ---
     if (uiAbsSum > 0)
     {
-      m_pcTrQuant->invTransformNxN(tu, compID, piResi, cQP);
+      if( !resiOfLevels )
+      {
+        m_pcTrQuant->invTransformNxN(tu, compID, piResi, cQP);
+      }
     }
     else
     {

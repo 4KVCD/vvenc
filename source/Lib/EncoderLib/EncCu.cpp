@@ -2149,7 +2149,10 @@ void EncCu::xCheckRDCostUnifiedMerge( CodingStructure *&tempCS, CodingStructure 
       {
         // no BDOF refinement was made for the luma prediction, need to have luma prediction again
         mergeItem->lumaPredReady = false;
+        mergeItem->psyPredDiff   = -1;   // psy-rd measured the prediction without the refinement
       }
+      // the luma prediction coded below is the one the ranking measured (psy-rd)
+      const bool lumaOfRanking = !resetCiip2Regular && mergeItem->lumaPredReady;
 
       PelUnitBuf *predBuf1   = nullptr, *predBuf2 = isCiip ? &ciipBuf : nullptr;
       PelUnitBuf  dstPredBuf = tempCS->getPredBuf();
@@ -2201,7 +2204,9 @@ void EncCu::xCheckRDCostUnifiedMerge( CodingStructure *&tempCS, CodingStructure 
         isRegularTestedAsSkip[mergeItem->mergeIdx] = true;
       }
 
+      m_cInterSearch.setPsyPredDiff( lumaOfRanking ? mergeItem->psyPredDiff : -1 );
       xEncodeInterResidual( tempCS, bestCS, partitioner, encTestMode, noResidualPass, noResidualPass == 0 ? &mergeItem->noResidual : nullptr );
+      m_cInterSearch.setPsyPredDiff( -1 );
 
       if( m_pcEncCfg->m_useFastMrg >= 2 )
       {
@@ -2369,7 +2374,7 @@ void EncCu::addRegularCandsToPruningList( const MergeCtx &mergeCtx, const UnitAr
     auto dstBuf             = regularMerge->getPredBuf( localUnitArea );
     // The SATD of this pass reads luma only, and most candidates end here. Chroma waits for the RD pass, as with the other merge types.
     generateMergePrediction ( localUnitArea, regularMerge, pu, true, false, dstBuf, false, false, &regularPred[uiMergeCand], nullptr );
-    regularMerge->cost      = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPassIntra, pu, distParam );
+    regularMerge->cost      = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPassIntra, pu, distParam, nullptr, m_mergeItemList.costToEnter(), &regularMerge->psyPredDiff );
     if( CU::checkDMVRCondition( pu ) ) std::copy_n( pu.mvdL0SubPu, getDmvrMvdNum( pu ), m_subPuMvOffset[uiMergeCand].data() );
     m_mergeItemList         . insertMergeItemToList( regularMerge );
   }
@@ -2417,7 +2422,7 @@ void EncCu::addCiipCandsToPruningList( const MergeCtx &mergeCtx, const UnitArea 
     ciipMerge->numCiipIntra   = numCiipIntra;
     auto dstBuf               = ciipMerge->getPredBuf( localUnitArea );
     generateMergePrediction   ( localUnitArea, ciipMerge, pu, true, false, dstBuf, false, false, nullptr, &ciipBuf );
-      ciipMerge->cost         = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPassIntra, pu, distParam );
+      ciipMerge->cost         = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPassIntra, pu, distParam, nullptr, m_mergeItemList.costToEnter(), &ciipMerge->psyPredDiff );
     if( !m_mergeItemList      . insertMergeItemToList( ciipMerge ) && m_pcEncCfg->m_CIIP > 1 )
     {
       break;
@@ -2512,7 +2517,9 @@ void EncCu::addMmvdCandsToPruningList( const MergeCtx &mergeCtx, const UnitArea 
     mmvdMerge->importMergeInfo( mergeCtx, mmvdIdx.val, MergeItem::MergeItemType::MMVD, pu );
     auto dstBuf               = mmvdMerge->getPredBuf( localUnitArea );
     generateMergePrediction   ( localUnitArea, mmvdMerge, pu, true, false, dstBuf, false, false, nullptr, nullptr );
-    mmvdMerge->cost           = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPassIntra, pu, distParam, &fracBitsOfStep[mmvdIdx.pos.baseIdx][mmvdIdx.pos.step] );
+    // a dropped candidate's cost is still compared with the best offset's below
+    const double dropCost     = m_pcEncCfg->m_MMVD > 1 ? std::max( m_mergeItemList.costToEnter(), bestCostOffset ) : m_mergeItemList.costToEnter();
+    mmvdMerge->cost           = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPassIntra, pu, distParam, &fracBitsOfStep[mmvdIdx.pos.baseIdx][mmvdIdx.pos.step], dropCost, &mmvdMerge->psyPredDiff );
     m_mergeItemList           . insertMergeItemToList( mmvdMerge );
 
     if( m_pcEncCfg->m_MMVD > 1 && mmvdMerge->cost < bestCostOffset )
@@ -2600,7 +2607,7 @@ void EncCu::addAffineCandsToPruningList( AffineMergeCtx &affineMergeCtx, const U
     mergeItem->importMergeInfo( affineMergeCtx, mergeIdx, affineMergeCtx.mergeType[mergeIdx] == MRG_TYPE_SUBPU_ATMVP ? MergeItem::MergeItemType::SBTMVP : MergeItem::MergeItemType::AFFINE, pu );
     auto dstBuf            = mergeItem->getPredBuf( localUnitArea );
     generateMergePrediction( localUnitArea, mergeItem, pu, true, false, dstBuf, false, false, nullptr, nullptr );
-    mergeItem->cost        = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPass, pu, distParam );
+    mergeItem->cost        = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPass, pu, distParam, nullptr, m_mergeItemList.costToEnter(), &mergeItem->psyPredDiff );
     m_mergeItemList        . insertMergeItemToList( mergeItem );
   }
   if( m_pcEncCfg->m_useFastMrg >= 2 )
@@ -2645,7 +2652,7 @@ void EncCu::addGpmCandsToPruningList( const MergeCtx &mergeCtx, const UnitArea &
     mergeItem->importMergeInfo( mergeCtx, gpmIndex, MergeItem::MergeItemType::GPM, pu );
     auto dstBuf            = mergeItem->getPredBuf( localUnitArea );
     generateMergePrediction( localUnitArea, mergeItem, pu, true, false, dstBuf, false, false, &geoBuffer[mergeIdxPair[0]], &geoBuffer[mergeIdxPair[1]] );
-    mergeItem->cost        = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPass, pu, distParam );
+    mergeItem->cost        = calcLumaCost4MergePrediction( ctxStart, dstBuf, sqrtLambdaForFirstPass, pu, distParam, nullptr, MAX_DOUBLE, &mergeItem->psyPredDiff );
     bestGeoCost            = std::min( mergeItem->cost, bestGeoCost );
 
     if( mergeItem->cost > MRG_FAST_RATIO[0] * bestGeoCost || mergeItem->cost > m_mergeBestSATDCost )
@@ -2992,7 +2999,8 @@ bool EncCu::prepareGpmComboList( const MergeCtx &mergeCtx, const UnitArea &local
   return true;
 }
 
-double EncCu::calcLumaCost4MergePrediction( const TempCtx &ctxStart, const PelUnitBuf &predBuf, double lambda, CodingUnit &cu, DistParam &distParam, uint64_t* knownFracBits )
+double EncCu::calcLumaCost4MergePrediction( const TempCtx &ctxStart, const PelUnitBuf &predBuf, double lambda, CodingUnit &cu, DistParam &distParam, uint64_t* knownFracBits,
+                                            double dropCost, int64_t* psyPredDiff )
 {
   distParam.cur = predBuf.Y();
   auto dist     = distParam.distFunc(distParam);
@@ -3018,10 +3026,17 @@ double EncCu::calcLumaCost4MergePrediction( const TempCtx &ctxStart, const PelUn
   // halves their grain), so the candidates that keep the grain were dropped before the RD check could weigh their psy term. The
   // prediction's psy distortion (its block energies against the source's, as the skip check measures it) is added here in the
   // ranking's SAD domain: the RD-domain term (strength x sqrt(lambda) x diff) divided by sqrt(lambda). Cost only: QPA reads dist.
-  if( m_cRdCost.usePsy() )
+  // The term is never negative, so a candidate whose cost already reaches dropCost (the caller drops it at that cost
+  // and reads it nowhere else) is dropped whatever its term: it is not computed. The sum over the blocks is kept for the
+  // RD pass (psyPredDiff), which codes the same prediction.
+  if( m_cRdCost.usePsy() && cost < dropCost )
   {
-    const Distortion psy = m_cRdCost.getPsyDistortion( *cu.cs->picture, cu.Y(), predBuf.Y(), cu.cs->sps->bitDepths[CH_L] );
-    cost += double( psy ) / m_cRdCost.getMotionLambda();
+    const int64_t diff = m_cRdCost.getPsyDiff( *cu.cs->picture, cu.Y(), predBuf.Y(), CPelBuf(), cu.cs->sps->bitDepths[CH_L] );
+    cost += double( m_cRdCost.getPsyDistortion( diff ) ) / m_cRdCost.getMotionLambda();
+    if( psyPredDiff )
+    {
+      *psyPredDiff = diff;
+    }
   }
 
   m_uiSadBestForQPA = std::min( dist, m_uiSadBestForQPA );
@@ -4377,6 +4392,7 @@ void MergeItem::init()
 
   lumaPredReady   = false;
   chromaPredReady = false;
+  psyPredDiff     = -1;
 }
 
 void MergeItem::importMergeInfo(const MergeCtx& mergeCtx, int _mergeIdx, MergeItemType _mergeItemType, CodingUnit& pu)

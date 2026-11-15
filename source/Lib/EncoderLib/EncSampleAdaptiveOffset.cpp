@@ -148,6 +148,11 @@ void EncSampleAdaptiveOffset::psyBeginCtu( CodingStructure& cs, const UnitArea& 
 // to the source's.
 int64_t EncSampleAdaptiveOffset::getPsyDistortion( int typeIdc, int typeAuxInfo, int* invQuantOffset )
 {
+  // offsets of 0 leave every (in-range) sample as it is: no change
+  if( std::all_of( invQuantOffset, invQuantOffset + MAX_NUM_SAO_CLASSES, []( int offset ) { return offset == 0; } ) )
+  {
+    return 0;
+  }
   const PelBuf pre     = m_ctuPreSao->get( COMP_Y );
   PelBuf       scratch = m_psyScratch.get( COMP_Y );
   const int    w       = m_psyArea.width;

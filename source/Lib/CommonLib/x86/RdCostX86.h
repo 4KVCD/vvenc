@@ -3456,13 +3456,115 @@ static inline int64_t sumLanesEpi32_AVX2( const __m256i v )
   return _mm_cvtsi128_si32( sum );
 }
 
-// psy-rd's group sums of an 8x8 block (RdCost::m_psyGroupSums8x8): per group of PSY_GROUPS_8x8 the L1 of the block's
-// transform coefficients; with b the block is a + b, the rows added in int16 before widening (a sum outside int16 wraps
-// as the C version's Pel sum). One transform; each group is a masked sum over the 8 row registers. A group's sum of at
-// most 18 coefficients of 2^21 stays inside int32.
-static void psyGroupSums8x8_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS] )
+// The group sums of an 8x8 transform held in 8 registers are masked sums over the registers. Two layouts:
+// - the transform of psyGroupSumsRows8x8_AVX2 holds the coefficients transposed against the C version (register u,
+//   lane v: see psyBandRows8x8_AVX2), which exchanges the two single-axis orientations of the groups: the C version's
+//   group g is the masked sum with the mask of group psyTransposedGroup( g ) (orientations 0 and 1 exchanged, the
+//   ring, + 3, kept), register u's lanes masked by row u of the mask;
+// - the transform built from four 4x4 quarters (psyTileGroupSums8x8_AVX2) holds per quarter two registers of its rows
+//   in the C version's orientation (PSY_QUARTER_MASKS_8x8).
+static constexpr int psyTransposedGroup( int g )
 {
-  __m256i r[8];
+  return g % 3 == 2 ? g : g - g % 3 + 1 - g % 3;
+}
+
+struct PsyRowMasks8x8
+{
+  static constexpr const int32_t* lanes( int g, int reg ) { return PSY_GROUPS_8x8.keep[g] + 8 * reg; }
+};
+
+// register 2 q + k of quarter q = 2 vHigh + uHigh holds rows vLow = 2 k and 2 k + 1 of the quarter: lane l is the 8x8
+// coefficient ( 4 vHigh + 2 k + l / 4, 4 uHigh + l % 4 ) (see RdCost::xPsyTileGroupSums8x8)
+struct PsyQuarterMaskTable
+{
+  alignas( 32 ) int32_t keep[PSY_NUM_GROUPS][8][8];
+};
+
+static constexpr PsyQuarterMaskTable psyQuarterMaskTable()
+{
+  PsyQuarterMaskTable table{};
+  for( int g = 0; g < PSY_NUM_GROUPS; g++ )
+    for( int reg = 0; reg < 8; reg++ )
+      for( int lane = 0; lane < 8; lane++ )
+      {
+        const int quarter = reg >> 1, k = reg & 1;
+        const int v = 4 * ( quarter >> 1 ) + 2 * k + ( lane >> 2 ), u = 4 * ( quarter & 1 ) + ( lane & 3 );
+        table.keep[g][reg][lane] = PSY_GROUPS_8x8.keep[g][v * 8 + u];
+      }
+  return table;
+}
+
+static constexpr PsyQuarterMaskTable PSY_QUARTER_MASKS_8x8 = psyQuarterMaskTable();
+
+struct PsyQuarterMasks8x8
+{
+  static constexpr const int32_t* lanes( int g, int reg ) { return PSY_QUARTER_MASKS_8x8.keep[g][reg]; }
+};
+
+// true when the mask of group g keeps a lane of register reg. A group holds 9 coefficients on average, which fill 3 or
+// 4 of the 8 registers: the masked sums skip the others at compile time (21 or 22 of the 48).
+template<class Masks>
+static constexpr bool psyMaskUsed( int g, int reg )
+{
+  for( int lane = 0; lane < 8; lane++ )
+  {
+    if( Masks::lanes( g, reg )[lane] )
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+// acc += the magnitudes in registers reg ... 7 of absRegs that the mask of group g keeps (unrolled at compile time)
+template<class Masks, int g, int reg>
+struct PsyMaskedSum_AVX2
+{
+  static constexpr bool used = psyMaskUsed<Masks>( g, reg );
+  static inline void add( const __m256i* absRegs, __m256i& acc )
+  {
+    if( used )
+    {
+      const __m256i keep = _mm256_load_si256( ( const __m256i* ) Masks::lanes( g, reg ) );
+      acc = _mm256_add_epi32( acc, _mm256_and_si256( absRegs[reg], keep ) );
+    }
+    PsyMaskedSum_AVX2<Masks, g, reg + 1>::add( absRegs, acc );
+  }
+};
+
+template<class Masks, int g>
+struct PsyMaskedSum_AVX2<Masks, g, 8>
+{
+  static inline void add( const __m256i*, __m256i& ) {}
+};
+
+// the lanes whose sum is group g (of the masks' table) of the magnitudes absRegs
+template<class Masks, int g>
+static inline __m256i psyGroupLanes8x8_AVX2( const __m256i* absRegs )
+{
+  __m256i acc = _mm256_setzero_si256();
+  PsyMaskedSum_AVX2<Masks, g, 0>::add( absRegs, acc );
+  return acc;
+}
+
+// The six lane sums of acc together, groups 0 ... 3 into the lanes of sums0123 and groups 4 and 5 into lanes 0 and 1
+// of sums45 (lanes 2 and 3 repeat them): a horizontal add of two registers leaves each one's pair sums side by side in
+// every 128-bit half, so two rounds give, per half, the half-sums of four groups; the halves are then added.
+static inline void psySumLanes6_AVX2( const __m256i acc[PSY_NUM_GROUPS], __m128i& sums0123, __m128i& sums45 )
+{
+  const __m256i pairs01  = _mm256_hadd_epi32( acc[0], acc[1] );
+  const __m256i pairs23  = _mm256_hadd_epi32( acc[2], acc[3] );
+  const __m256i pairs45  = _mm256_hadd_epi32( acc[4], acc[5] );
+  const __m256i half0123 = _mm256_hadd_epi32( pairs01, pairs23 );
+  const __m256i half45   = _mm256_hadd_epi32( pairs45, pairs45 );
+  sums0123 = _mm_add_epi32( _mm256_castsi256_si128( half0123 ), _mm256_extracti128_si256( half0123, 1 ) );
+  sums45   = _mm_add_epi32( _mm256_castsi256_si128( half45 ), _mm256_extracti128_si256( half45, 1 ) );
+}
+
+// the rows of the 8x8 block a as int32, or of a + b when b is given: the rows added in int16 before widening (a sum
+// outside int16 wraps as the C version's Pel sum)
+static inline void psyLoadRows8x8_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, __m256i r[8] )
+{
   for( int y = 0; y < 8; y++ )
   {
     __m128i row = _mm_loadu_si128( ( const __m128i* ) ( a + y * aStride ) );
@@ -3472,6 +3574,12 @@ static void psyGroupSums8x8_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b,
     }
     r[y] = _mm256_cvtepi16_epi32( row );
   }
+}
+
+// The group sums (PSY_GROUPS_8x8) of the 8x8 block whose rows are r, in the C version's order (psySumLanes6_AVX2). One
+// transform; a group's sum of at most 18 coefficients of 2^21 stays inside int32.
+static inline void psyGroupSumsRows8x8_AVX2( __m256i r[8], __m128i& sums0123, __m128i& sums45 )
+{
   hadamardButterflies8x8_AVX2( r );
   transpose8x8Epi32_AVX2( r );
   hadamardButterflies8x8_AVX2( r );
@@ -3479,34 +3587,52 @@ static void psyGroupSums8x8_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b,
   {
     r[u] = _mm256_abs_epi32( r[u] );
   }
-  // The registers hold the transform transposed against the C version (register u, lane v: see psyBandRows8x8_AVX2),
-  // which exchanges the two single-axis orientations: the masked sum of group g here is the C version's group with the
-  // orientations 0 and 1 exchanged (the ring, + 3, stays).
-  static const int transposedGroup[PSY_NUM_GROUPS] = { 1, 0, 2, 4, 3, 5 };
-  __m256i acc[PSY_NUM_GROUPS];
-  for( int g = 0; g < PSY_NUM_GROUPS; g++ )
-  {
-    acc[g] = _mm256_setzero_si256();
-    for( int u = 0; u < 8; u++ )
-    {
-      const __m256i keep = _mm256_load_si256( ( const __m256i* ) ( PSY_GROUPS_8x8.keep[g] + 8 * u ) );
-      acc[g] = _mm256_add_epi32( acc[g], _mm256_and_si256( r[u], keep ) );
-    }
-  }
-  // The six lane sums together: a horizontal add of two registers leaves each one's pair sums side by side in every
-  // 128-bit half, so two rounds give, per half, the half-sums of four groups; the halves are then added.
-  const __m256i pairs01  = _mm256_hadd_epi32( acc[0], acc[1] );
-  const __m256i pairs23  = _mm256_hadd_epi32( acc[2], acc[3] );
-  const __m256i pairs45  = _mm256_hadd_epi32( acc[4], acc[5] );
-  const __m256i half0123 = _mm256_hadd_epi32( pairs01, pairs23 );
-  const __m256i half45   = _mm256_hadd_epi32( pairs45, pairs45 );
+  const __m256i acc[PSY_NUM_GROUPS] = { psyGroupLanes8x8_AVX2<PsyRowMasks8x8, psyTransposedGroup( 0 )>( r ), psyGroupLanes8x8_AVX2<PsyRowMasks8x8, psyTransposedGroup( 1 )>( r ),
+                                        psyGroupLanes8x8_AVX2<PsyRowMasks8x8, psyTransposedGroup( 2 )>( r ), psyGroupLanes8x8_AVX2<PsyRowMasks8x8, psyTransposedGroup( 3 )>( r ),
+                                        psyGroupLanes8x8_AVX2<PsyRowMasks8x8, psyTransposedGroup( 4 )>( r ), psyGroupLanes8x8_AVX2<PsyRowMasks8x8, psyTransposedGroup( 5 )>( r ) };
+  psySumLanes6_AVX2( acc, sums0123, sums45 );
+}
+
+// the lane sums of recSums (into *recL1) and of diffs (returned), both in int32
+static inline int64_t psySumRecAndDiff_SSE( const __m128i recSums, const __m128i diffs, int64_t* recL1 )
+{
+  const __m128i pairs = _mm_hadd_epi32( recSums, diffs );   // rec 0 + 1, rec 2 + 3, diff 0 + 1, diff 2 + 3
+  const __m128i sums  = _mm_hadd_epi32( pairs, pairs );     // rec, diff, rec, diff
+  *recL1 = _mm_cvtsi128_si32( sums );
+  return _mm_extract_epi32( sums, 1 );
+}
+
+// psy-rd's group sums of an 8x8 block (RdCost::m_psyGroupSums8x8): per group of PSY_GROUPS_8x8 the L1 of the block's
+// transform coefficients, of a or of a + b
+static void psyGroupSums8x8_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS] )
+{
+  __m256i r[8];
+  psyLoadRows8x8_AVX2( a, aStride, b, bStride, r );
+  __m128i sums0123, sums45;
+  psyGroupSumsRows8x8_AVX2( r, sums0123, sums45 );
   alignas( 16 ) int32_t laneSums[8];
-  _mm_store_si128( ( __m128i* ) laneSums,         _mm_add_epi32( _mm256_castsi256_si128( half0123 ), _mm256_extracti128_si256( half0123, 1 ) ) );
-  _mm_store_si128( ( __m128i* ) ( laneSums + 4 ), _mm_add_epi32( _mm256_castsi256_si128( half45 ), _mm256_extracti128_si256( half45, 1 ) ) );
+  _mm_store_si128( ( __m128i* ) laneSums,         sums0123 );
+  _mm_store_si128( ( __m128i* ) ( laneSums + 4 ), sums45 );
   for( int g = 0; g < PSY_NUM_GROUPS; g++ )
   {
-    sums[transposedGroup[g]] = laneSums[g];
+    sums[g] = laneSums[g];
   }
+}
+
+// psy-rd's grouped band difference of an 8x8 block (RdCost::m_psyGroupDiff8x8): the group sums of rec (+ resi) as
+// psyGroupSums8x8_AVX2, then their differences to the source's and both totals in int32 (each difference is under
+// 2^27, the total under 2^30)
+static int64_t psyGroupDiff8x8_AVX2( const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, const int32_t orgGroups[PSY_NUM_GROUPS], int64_t* recL1 )
+{
+  __m256i r[8];
+  psyLoadRows8x8_AVX2( rec, recStride, resi, resiStride, r );
+  __m128i rec0123, rec45;
+  psyGroupSumsRows8x8_AVX2( r, rec0123, rec45 );
+  rec45 = _mm_move_epi64( rec45 );   // groups 4 and 5 only: the repeats cleared, as the source's lanes 2 and 3 below
+  const __m128i org0123 = _mm_loadu_si128( ( const __m128i* ) orgGroups );
+  const __m128i org45   = _mm_loadl_epi64( ( const __m128i* ) ( orgGroups + 4 ) );
+  const __m128i diffs   = _mm_add_epi32( _mm_abs_epi32( _mm_sub_epi32( org0123, rec0123 ) ), _mm_abs_epi32( _mm_sub_epi32( org45, rec45 ) ) );
+  return psySumRecAndDiff_SSE( _mm_add_epi32( rec0123, rec45 ), diffs, recL1 );
 }
 
 static int64_t psyBand8x8_AVX2( const Pel* src, ptrdiff_t stride )
@@ -3573,9 +3699,9 @@ static int64_t psyBand4x4_AVX2( const Pel* src, ptrdiff_t stride )
   return psyBandRows4x4_AVX2( loadRows4x2_AVX2( src, stride ), loadRows4x2_AVX2( src + 2 * stride, stride ) );
 }
 
-// psy-rd's group sums of a 4x4 block (RdCost::m_psyGroupSums4x4): per group of PSY_GROUPS_4x4 the L1 of the block's
-// transform coefficients; with b the block is a + b, added in int16 before widening like the 8x8 version. One transform.
-static void psyGroupSums4x4_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS_4x4] )
+// the rows of the 4x4 block a (+ b, added in int16 before widening like the 8x8 version) as int32: rows 0 / 1 in the
+// 128-bit lanes of r01, rows 2 / 3 in those of r23 (see psyAbsTransform4x4_AVX2)
+static inline void psyLoadRows4x4_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, __m256i& r01, __m256i& r23 )
 {
   __m256i r[2];
   for( int i = 0; i < 2; i++ )
@@ -3589,12 +3715,143 @@ static void psyGroupSums4x4_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b,
     }
     r[i] = _mm256_cvtepi16_epi32( rows );
   }
+  r01 = r[0];
+  r23 = r[1];
+}
+
+// The lane sums of the PSY_NUM_GROUPS_4x4 registers masked, in lanes 0 ... 2 (lane 3: 0). As in psySumLanes6_AVX2, two
+// rounds of horizontal adds leave each group's half-sums side by side; the halves are then added.
+static inline __m128i psySumLanes3_AVX2( const __m256i masked[PSY_NUM_GROUPS_4x4] )
+{
+  static_assert( PSY_NUM_GROUPS_4x4 == 3, "three group sums and a zero lane" );
+  const __m256i pairs01 = _mm256_hadd_epi32( masked[0], masked[1] );
+  const __m256i pairs2  = _mm256_hadd_epi32( masked[2], _mm256_setzero_si256() );
+  const __m256i halves  = _mm256_hadd_epi32( pairs01, pairs2 );
+  return _mm_add_epi32( _mm256_castsi256_si128( halves ), _mm256_extracti128_si256( halves, 1 ) );
+}
+
+// the PSY_NUM_GROUPS_4x4 group sums of the 4x4 block in rows r01 / r23, in lanes 0 ... 2 (lane 3: 0)
+static inline __m128i psyGroupSumsRows4x4_AVX2( const __m256i r01, const __m256i r23 )
+{
   __m256i abs0, abs1;
-  psyAbsTransform4x4_AVX2( r[0], r[1], abs0, abs1 );
+  psyAbsTransform4x4_AVX2( r01, r23, abs0, abs1 );
+  __m256i masked[PSY_NUM_GROUPS_4x4];
   for( int g = 0; g < PSY_NUM_GROUPS_4x4; g++ )
   {
-    sums[g] = psyMaskedSum4x4_AVX2( abs0, abs1, PSY_GROUPS_4x4.keep[g] );
+    const int32_t* keep  = PSY_GROUPS_4x4.keep[g];   // row v of the mask at keep + 4 * v
+    const __m256i  keep0 = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_load_si128( ( const __m128i* ) keep ) ), _mm_load_si128( ( const __m128i* ) ( keep + 8 ) ), 1 );
+    const __m256i  keep1 = _mm256_inserti128_si256( _mm256_castsi128_si256( _mm_load_si128( ( const __m128i* ) ( keep + 4 ) ) ), _mm_load_si128( ( const __m128i* ) ( keep + 12 ) ), 1 );
+    masked[g] = _mm256_add_epi32( _mm256_and_si256( abs0, keep0 ), _mm256_and_si256( abs1, keep1 ) );
   }
+  return psySumLanes3_AVX2( masked );
+}
+
+// psy-rd's group sums of a 4x4 block (RdCost::m_psyGroupSums4x4): per group of PSY_GROUPS_4x4 the L1 of the block's
+// transform coefficients, of a or of a + b. One transform.
+static void psyGroupSums4x4_AVX2( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS_4x4] )
+{
+  __m256i r01, r23;
+  psyLoadRows4x4_AVX2( a, aStride, b, bStride, r01, r23 );
+  alignas( 16 ) int32_t laneSums[4];
+  _mm_store_si128( ( __m128i* ) laneSums, psyGroupSumsRows4x4_AVX2( r01, r23 ) );
+  for( int g = 0; g < PSY_NUM_GROUPS_4x4; g++ )
+  {
+    sums[g] = laneSums[g];
+  }
+}
+
+// psy-rd's grouped band difference of a 4x4 block (RdCost::m_psyGroupDiff4x4), as the 8x8 version. The source's three
+// sums are read with a masked load: the fourth lane is not read (it may lie past the table's end) and is 0, as the
+// block's.
+static int64_t psyGroupDiff4x4_AVX2( const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, const int32_t orgGroups[PSY_NUM_GROUPS_4x4], int64_t* recL1 )
+{
+  __m256i r01, r23;
+  psyLoadRows4x4_AVX2( rec, recStride, resi, resiStride, r01, r23 );
+  const __m128i recSums = psyGroupSumsRows4x4_AVX2( r01, r23 );
+  const __m128i orgSums = _mm_maskload_epi32( orgGroups, _mm_setr_epi32( -1, -1, -1, 0 ) );
+  return psySumRecAndDiff_SSE( recSums, _mm_abs_epi32( _mm_sub_epi32( orgSums, recSums ) ), recL1 );
+}
+
+// the 4-point transform (natural order, see hadamardRows4_AVX2) down the columns of the rows r0 ... r3
+static inline void hadamardColumns4_AVX2( __m256i& r0, __m256i& r1, __m256i& r2, __m256i& r3 )
+{
+  const __m256i sum01 = _mm256_add_epi32( r0, r1 ), diff01 = _mm256_sub_epi32( r0, r1 );
+  const __m256i sum23 = _mm256_add_epi32( r2, r3 ), diff23 = _mm256_sub_epi32( r2, r3 );
+  r0 = _mm256_add_epi32( sum01, sum23 );
+  r1 = _mm256_add_epi32( diff01, diff23 );
+  r2 = _mm256_sub_epi32( sum01, sum23 );
+  r3 = _mm256_sub_epi32( diff01, diff23 );
+}
+
+// psy-rd's 4x4 transforms of a row of blocks (RdCost::m_psyTransform4x4Tiles). Two blocks side by side at a time: a row
+// of 8 samples is one register, a block per 128-bit half, so the same butterflies transform both. Their coefficient
+// rows v = 0, 1 and v = 2, 3 are then paired per block (the C version's order v * 4 + u).
+static void psyTransform4x4Tiles_AVX2( const Pel* src, ptrdiff_t stride, int numTiles, int32_t* coefs )
+{
+  int t = 0;
+  for( ; t + 2 <= numTiles; t += 2, src += 8, coefs += 32 )
+  {
+    __m256i r0 = _mm256_cvtepi16_epi32( _mm_loadu_si128( ( const __m128i* ) src ) );
+    __m256i r1 = _mm256_cvtepi16_epi32( _mm_loadu_si128( ( const __m128i* ) ( src + stride ) ) );
+    __m256i r2 = _mm256_cvtepi16_epi32( _mm_loadu_si128( ( const __m128i* ) ( src + 2 * stride ) ) );
+    __m256i r3 = _mm256_cvtepi16_epi32( _mm_loadu_si128( ( const __m128i* ) ( src + 3 * stride ) ) );
+    hadamardColumns4_AVX2( r0, r1, r2, r3 );   // register v: the vertical frequency v
+    r0 = hadamardRows4_AVX2( r0 );             // lane u of each half: the horizontal frequency u
+    r1 = hadamardRows4_AVX2( r1 );
+    r2 = hadamardRows4_AVX2( r2 );
+    r3 = hadamardRows4_AVX2( r3 );
+    _mm256_storeu_si256( ( __m256i* ) coefs,          _mm256_permute2x128_si256( r0, r1, 0x20 ) );
+    _mm256_storeu_si256( ( __m256i* ) ( coefs + 8 ),  _mm256_permute2x128_si256( r2, r3, 0x20 ) );
+    _mm256_storeu_si256( ( __m256i* ) ( coefs + 16 ), _mm256_permute2x128_si256( r0, r1, 0x31 ) );
+    _mm256_storeu_si256( ( __m256i* ) ( coefs + 24 ), _mm256_permute2x128_si256( r2, r3, 0x31 ) );
+  }
+  if( t < numTiles )   // the last block of an odd count
+  {
+    RdCost::xPsyTransform4x4Tiles( src, stride, 1, coefs );
+  }
+}
+
+// psy-rd's group sums of a 4x4 block from its transform (RdCost::m_psyTileGroupSums4x4): rows v = 0, 1 and v = 2, 3
+// of the coefficients are one register each, masked by the same rows of the masks
+static void psyTileGroupSums4x4_AVX2( const int32_t* coefs, int32_t sums[PSY_NUM_GROUPS_4x4] )
+{
+  const __m256i abs01 = _mm256_abs_epi32( _mm256_loadu_si256( ( const __m256i* ) coefs ) );
+  const __m256i abs23 = _mm256_abs_epi32( _mm256_loadu_si256( ( const __m256i* ) ( coefs + 8 ) ) );
+  __m256i masked[PSY_NUM_GROUPS_4x4];
+  for( int g = 0; g < PSY_NUM_GROUPS_4x4; g++ )
+  {
+    masked[g] = _mm256_add_epi32( _mm256_and_si256( abs01, _mm256_load_si256( ( const __m256i* ) PSY_GROUPS_4x4.keep[g] ) ),
+                                  _mm256_and_si256( abs23, _mm256_load_si256( ( const __m256i* ) ( PSY_GROUPS_4x4.keep[g] + 8 ) ) ) );
+  }
+  _mm_maskstore_epi32( sums, _mm_setr_epi32( -1, -1, -1, 0 ), psySumLanes3_AVX2( masked ) );
+}
+
+// psy-rd's group sums of the 8x8 block made of four 4x4 quarters (RdCost::m_psyTileGroupSums8x8; see
+// RdCost::xPsyTileGroupSums8x8 for the butterflies): per quarter two registers (its rows vLow = 0, 1 and 2, 3), 16
+// butterflies over the 8 registers of the four transforms, then the masked sums of PSY_QUARTER_MASKS_8x8
+static void psyTileGroupSums8x8_AVX2( const int32_t* topLeft, const int32_t* topRight, const int32_t* bottomLeft, const int32_t* bottomRight, int32_t sums[PSY_NUM_GROUPS] )
+{
+  __m256i absRegs[8];   // register 2 q + k: quarter q = 2 vHigh + uHigh, rows 2 k and 2 k + 1
+  for( int k = 0; k < 2; k++ )
+  {
+    const __m256i tl         = _mm256_loadu_si256( ( const __m256i* ) ( topLeft + 8 * k ) );
+    const __m256i tr         = _mm256_loadu_si256( ( const __m256i* ) ( topRight + 8 * k ) );
+    const __m256i bl         = _mm256_loadu_si256( ( const __m256i* ) ( bottomLeft + 8 * k ) );
+    const __m256i br         = _mm256_loadu_si256( ( const __m256i* ) ( bottomRight + 8 * k ) );
+    const __m256i topSum     = _mm256_add_epi32( tl, tr ), topDiff    = _mm256_sub_epi32( tl, tr );
+    const __m256i bottomSum  = _mm256_add_epi32( bl, br ), bottomDiff = _mm256_sub_epi32( bl, br );
+    absRegs[0 + k] = _mm256_abs_epi32( _mm256_add_epi32( topSum, bottomSum ) );     // vHigh 0, uHigh 0
+    absRegs[2 + k] = _mm256_abs_epi32( _mm256_add_epi32( topDiff, bottomDiff ) );   // vHigh 0, uHigh 1
+    absRegs[4 + k] = _mm256_abs_epi32( _mm256_sub_epi32( topSum, bottomSum ) );     // vHigh 1, uHigh 0
+    absRegs[6 + k] = _mm256_abs_epi32( _mm256_sub_epi32( topDiff, bottomDiff ) );   // vHigh 1, uHigh 1
+  }
+  const __m256i acc[PSY_NUM_GROUPS] = { psyGroupLanes8x8_AVX2<PsyQuarterMasks8x8, 0>( absRegs ), psyGroupLanes8x8_AVX2<PsyQuarterMasks8x8, 1>( absRegs ),
+                                        psyGroupLanes8x8_AVX2<PsyQuarterMasks8x8, 2>( absRegs ), psyGroupLanes8x8_AVX2<PsyQuarterMasks8x8, 3>( absRegs ),
+                                        psyGroupLanes8x8_AVX2<PsyQuarterMasks8x8, 4>( absRegs ), psyGroupLanes8x8_AVX2<PsyQuarterMasks8x8, 5>( absRegs ) };
+  __m128i sums0123, sums45;
+  psySumLanes6_AVX2( acc, sums0123, sums45 );
+  _mm_storeu_si128( ( __m128i* ) sums, sums0123 );
+  _mm_storel_epi64( ( __m128i* ) ( sums + 4 ), sums45 );
 }
 #endif
 
@@ -3661,6 +3918,11 @@ void RdCost::_initRdCostX86()
     m_psyBand4x4             = psyBand4x4_AVX2;
     m_psyGroupSums8x8        = psyGroupSums8x8_AVX2;
     m_psyGroupSums4x4        = psyGroupSums4x4_AVX2;
+    m_psyGroupDiff8x8        = psyGroupDiff8x8_AVX2;
+    m_psyGroupDiff4x4        = psyGroupDiff4x4_AVX2;
+    m_psyTransform4x4Tiles   = psyTransform4x4Tiles_AVX2;
+    m_psyTileGroupSums4x4    = psyTileGroupSums4x4_AVX2;
+    m_psyTileGroupSums8x8    = psyTileGroupSums8x8_AVX2;
   }
 #endif
 }

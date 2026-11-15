@@ -624,6 +624,11 @@ protected:
   uint8_t           m_sbtRdoOrder[NUMBER_SBT_MODE];       // order of SBT mode in RDO
   uint64_t          m_tuResiBits[MAX_NUM_TBLOCKS];        // residual bits per component of the CU's single TU
   bool              m_tuResiBitsValid = false;
+  // psy-rd of the CU's luma prediction over its whole area, as the TU search measured it (encodeResAndCalcRdInterCU)
+  Distortion        m_psyPredDistCU;
+  bool              m_psyPredDistCUKnown = false;
+  // psy-rd's sum over the blocks of that prediction where the caller measured it already (-1: not), see setPsyPredDiff
+  int64_t           m_psyPredDiffGiven = -1;
   Ctx               m_tuLumaCtx;                          // what luma's coefficients of that TU left in the coefficient contexts
   Ctx               m_tuChromaCtx;                        // what chroma's left there
   bool              m_skipSbtAll;                         // to skip all SBT modes for the current PU
@@ -666,6 +671,9 @@ public:
   /// set ME search range
   // bestCost: the cost to beat. A candidate at or above it needs no contexts left behind.
   void encodeResAndCalcRdInterCU    ( CodingStructure &cs, Partitioner &partitioner, const bool skipResidual, const double bestCost = MAX_DOUBLE );
+  // psy-rd: the sum over the blocks (RdCost::getPsyDiff) of the CU's luma prediction over its whole area, as the caller
+  // measured it (the merge ranking), for the next encodeResAndCalcRdInterCU only; -1: not known
+  void setPsyPredDiff               ( int64_t psyPredDiff ) { m_psyPredDiffGiven = psyPredDiff; }
 
   void setSearchRange               ( const Slice* slice, const VVEncCfg& encCfg );
 
@@ -892,6 +900,7 @@ private:
 
   void xEncodeInterResidualQT         ( CodingStructure &cs, Partitioner &partitioner, const ComponentID compID );
   void xEstimateInterResidualQT       ( CodingStructure &cs, Partitioner &partitioner, const Ctx& ctxStart, Distortion *puiZeroDist = NULL );
+  Distortion xGetPsyOfPrediction      ( const CodingStructure &cs, const CompArea &area );
   uint64_t xGetSymbolFracBitsInter    ( CodingStructure &cs, Partitioner &partitioner );
   void  xSetIntraSearchRangeIBC       ( CodingUnit& pu, int iRoiWidth, int iRoiHeight, Mv& rcMvSrchRngLT, Mv& rcMvSrchRngRB);
   void  xIBCEstimation                ( CodingUnit& cu, PelUnitBuf& origBuf, Mv* pcMvPred, Mv& rcMv, Distortion& ruiCost );

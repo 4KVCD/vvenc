@@ -268,6 +268,21 @@ public:
   void       ( *m_psyGroupSums8x8 )( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS] );
   // the same of a 4x4 block: the PSY_NUM_GROUPS_4x4 sums of PSY_GROUPS_4x4, which add up to m_psyBand4x4
   void       ( *m_psyGroupSums4x4 )( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS_4x4] );
+  // psy-rd's grouped band difference of one 8x8 block from ONE transform of rec (+ resi, summed as Pel; resi may be
+  // null), without a credit: returns the sum over the groups of | orgGroups[g] - the block's group L1 g | (orgGroups:
+  // the source's sums from the picture's table, Picture::psyOrgGroups) and sets *recL1 to the block's band L1 (the sum
+  // of its group L1s, what m_psyBand8x8 returns)
+  int64_t    ( *m_psyGroupDiff8x8 )( const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, const int32_t orgGroups[PSY_NUM_GROUPS], int64_t* recL1 );
+  // the same of a 4x4 block, over the PSY_NUM_GROUPS_4x4 groups (orgGroups from Picture::psyOrgGroups4x4)
+  int64_t    ( *m_psyGroupDiff4x4 )( const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, const int32_t orgGroups[PSY_NUM_GROUPS_4x4], int64_t* recL1 );
+  // psy-rd's picture tables (buildPsyOrgEnergies): the transforms of numTiles 4x4 blocks side by side from src, 16 int32
+  // per block in the C version's order (v * 4 + u)
+  void       ( *m_psyTransform4x4Tiles )( const Pel* src, ptrdiff_t stride, int numTiles, int32_t* coefs );
+  // the group sums (PSY_GROUPS_4x4) of a 4x4 block from its transform
+  void       ( *m_psyTileGroupSums4x4 )( const int32_t* coefs, int32_t sums[PSY_NUM_GROUPS_4x4] );
+  // the group sums (PSY_GROUPS_8x8) of the 8x8 block whose four 4x4 quarters have these transforms (see
+  // buildPsyOrgEnergies): the same as m_psyGroupSums8x8 of the block
+  void       ( *m_psyTileGroupSums8x8 )( const int32_t* topLeft, const int32_t* topRight, const int32_t* bottomLeft, const int32_t* bottomRight, int32_t sums[PSY_NUM_GROUPS] );
 
   // for distortion
   FpDistFunc              m_afpDistortFunc[2][DF_TOTAL_FUNCTIONS]; // [eDFunc]
@@ -339,8 +354,12 @@ public:
   // only this share of the reconstruction's energy counts against the source's (1: all; IntraSearch's angular modes in grain)
   void          setPsyRecCredit     ( double credit )                   { m_psyRecCredit = credit; }
   // of rec, or of rec + resi when resi is given (the transform decisions have the residual but no reconstruction yet)
-  Distortion    getPsyDistortion    ( const Picture& pic, const CompArea& area, const CPelBuf& rec, const CPelBuf& resi, int bitDepth ) const;
+  Distortion    getPsyDistortion    ( const Picture& pic, const CompArea& area, const CPelBuf& rec, const CPelBuf& resi, int bitDepth ) const { return getPsyDistortion( getPsyDiff( pic, area, rec, resi, bitDepth ) ); }
   Distortion    getPsyDistortion    ( const Picture& pic, const CompArea& area, const CPelBuf& rec, int bitDepth ) const { return getPsyDistortion( pic, area, rec, CPelBuf(), bitDepth ); }
+  // the two steps of getPsyDistortion: the sum over the blocks, which depends only on the samples, the source and the
+  // credit; and the distortion of that sum at the current strength and lambda
+  int64_t       getPsyDiff          ( const Picture& pic, const CompArea& area, const CPelBuf& rec, const CPelBuf& resi, int bitDepth ) const;
+  Distortion    getPsyDistortion    ( int64_t psyDiff ) const;
   // the grouped band difference of pred + resi (resi may be empty) to the source over the area's n x n blocks (no
   // strength, lambda or credit): psy-rdoq's per-TU choice compares two quantisations with it
   int64_t       getPsyGroupGap      ( const Picture& pic, const CompArea& area, const CPelBuf& pred, const CPelBuf& resi ) const;
@@ -439,6 +458,16 @@ public:
   static int64_t    xPsyBand4x4       ( const Pel* src, ptrdiff_t stride ) { return xPsyBandL1( src, stride, 4 ); }
   static void       xPsyGroupSums8x8  ( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS] );
   static void       xPsyGroupSums4x4  ( const Pel* a, ptrdiff_t aStride, const Pel* b, ptrdiff_t bStride, int64_t sums[PSY_NUM_GROUPS_4x4] );
+  static int64_t    xPsyGroupDiff8x8  ( const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, const int32_t orgGroups[PSY_NUM_GROUPS], int64_t* recL1 );
+  static int64_t    xPsyGroupDiff4x4  ( const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, const int32_t orgGroups[PSY_NUM_GROUPS_4x4], int64_t* recL1 );
+  static void       xPsyTransform4x4Tiles( const Pel* src, ptrdiff_t stride, int numTiles, int32_t* coefs );
+  static void       xPsyTileGroupSums4x4 ( const int32_t* coefs, int32_t sums[PSY_NUM_GROUPS_4x4] );
+  static void       xPsyTileGroupSums8x8 ( const int32_t* topLeft, const int32_t* topRight, const int32_t* bottomLeft, const int32_t* bottomRight, int32_t sums[PSY_NUM_GROUPS] );
+  template<int n>
+  int64_t           xPsyDiffFromTables( const Picture& pic, const CompArea& area, const CPelBuf& rec, const CPelBuf& resi, int shift ) const;
+  template<int n>
+  int64_t           xPsyGroupGapFromTables( const Picture& pic, const CompArea& area, const CPelBuf& pred, const CPelBuf& resi ) const;
+  int64_t           xPsyDiffAnyBlock  ( const Picture& pic, const CompArea& area, const CPelBuf& rec, const CPelBuf& resi, int shift ) const;
   void              xPsyBlock         ( const Picture& pic, const CPelBuf& org, int x, int y, int xInArea, int yInArea, int n, const CPelBuf& rec, const CPelBuf& resi, double credit, int64_t& recL1, int64_t& groupDiff ) const;
   static int64_t    xPsySliverDiff    ( const Pel* org, ptrdiff_t orgStride, const Pel* rec, ptrdiff_t recStride, const Pel* resi, ptrdiff_t resiStride, int n, double credit );
   int64_t           xPsyEnergy        ( const Pel* src, ptrdiff_t stride, int n, int shift ) const;
