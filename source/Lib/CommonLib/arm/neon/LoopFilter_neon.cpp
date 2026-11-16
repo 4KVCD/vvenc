@@ -382,8 +382,12 @@ static void xPelFilterLumaHor_neon( Pel* piSrc, const ptrdiff_t offset, const in
 
 // A vertical edge: the lines are the 4 rows from piSrc on, each [ p3 p2 p1 p0 q0 q1 q2 q3 ] around piSrc. Transposing
 // both halves gives a0 = [ p3 | q0 ], a1 = [ p2 | q1 ], a2 = [ p1 | q2 ], a3 = [ p0 | q3 ], and x_k takes the low half
-// of a_3-k and the high half of a_k. That map and the transpose are their own inverses, so the same steps write back
-// the 8 samples of each line (those the filter does not change with the values they had).
+// of a_3-k and the high half of a_k. That map and the transpose are their own inverses, so after the strong filter the
+// same steps give the 8 filtered samples of each line back; it needs blocks at least 8 wide on both sides, so no other
+// vertical edge reaches p3 .. q3. The weak filter stores only p1 .. q1, the samples it can change, as the x86 kernel
+// does: the edges on both sides of a 4-wide block both read the 4 samples between them, and the edges of neighbouring
+// CTUs are filtered by different threads at the same time, so storing p3, p2 (q2, q3) back could overwrite a sample the
+// other edge has just filtered.
 static void xPelFilterLumaVer_neon( Pel* piSrc, const ptrdiff_t step, const int tc, const bool sw, const int thrCut,
                                     const bool secondP, const bool secondQ, const ClpRng& clpRng )
 {
@@ -399,19 +403,33 @@ static void xPelFilterLumaVer_neon( Pel* piSrc, const ptrdiff_t step, const int 
   const int16x8_t x3 = vcombine_s16( vget_low_s16( a0 ), vget_high_s16( a3 ) );
 
   if( sw )
+  {
     xPelFilterLumaStrong_neon( x0, x1, x2, x3, tc );
+    a0 = vcombine_s16( vget_low_s16( x3 ), vget_high_s16( x0 ) );
+    a1 = vcombine_s16( vget_low_s16( x2 ), vget_high_s16( x1 ) );
+    a2 = vcombine_s16( vget_low_s16( x1 ), vget_high_s16( x2 ) );
+    a3 = vcombine_s16( vget_low_s16( x0 ), vget_high_s16( x3 ) );
+    transpose_4x4_s16_halves( a0, a1, a2, a3 );
+    vst1q_s16( piSrc - 4,            a0 );
+    vst1q_s16( piSrc - 4 + step,     a1 );
+    vst1q_s16( piSrc - 4 + 2 * step, a2 );
+    vst1q_s16( piSrc - 4 + 3 * step, a3 );
+  }
   else
+  {
     xPelFilterLumaWeak_neon( x0, x1, x2, tc, thrCut, secondP, secondQ, clpRng );
-
-  a0 = vcombine_s16( vget_low_s16( x3 ), vget_high_s16( x0 ) );
-  a1 = vcombine_s16( vget_low_s16( x2 ), vget_high_s16( x1 ) );
-  a2 = vcombine_s16( vget_low_s16( x1 ), vget_high_s16( x2 ) );
-  a3 = vcombine_s16( vget_low_s16( x0 ), vget_high_s16( x3 ) );
-  transpose_4x4_s16_halves( a0, a1, a2, a3 );
-  vst1q_s16( piSrc - 4,            a0 );
-  vst1q_s16( piSrc - 4 + step,     a1 );
-  vst1q_s16( piSrc - 4 + 2 * step, a2 );
-  vst1q_s16( piSrc - 4 + 3 * step, a3 );
+    // the 16-bit zips give the [ p1 p0 ] and [ q0 q1 ] pairs of each line, the 32-bit zip joins them into
+    // line01 = [ line 0 | line 1 ] and line23 = [ line 2 | line 3 ], each [ p1 p0 q0 q1 ]
+    const int16x8_t   p1p0   = vzipq_s16( x1, x0 ).val[0];
+    const int16x8_t   q0q1   = vzipq_s16( x0, x1 ).val[1];
+    const int32x4x2_t lines  = vzipq_s32( vreinterpretq_s32_s16( p1p0 ), vreinterpretq_s32_s16( q0q1 ) );
+    const int16x8_t   line01 = vreinterpretq_s16_s32( lines.val[0] );
+    const int16x8_t   line23 = vreinterpretq_s16_s32( lines.val[1] );
+    vst1_s16( piSrc - 2,            vget_low_s16( line01 ) );
+    vst1_s16( piSrc - 2 + step,     vget_high_s16( line01 ) );
+    vst1_s16( piSrc - 2 + 2 * step, vget_low_s16( line23 ) );
+    vst1_s16( piSrc - 2 + 3 * step, vget_high_s16( line23 ) );
+  }
 }
 
 static void xPelFilterLumaNeon( Pel* piSrc, const ptrdiff_t step, const ptrdiff_t offset, const int tc, const bool sw,
