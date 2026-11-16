@@ -2529,12 +2529,23 @@ void FGAnalyzer::cutPlateauHoles( std::vector<std::vector<int>>& parameters, int
       {
         continue;
       }
+      // The part below the hole ends at the 8-bit value v8 - 2. setEstimatedParameters makes the bounds strictly
+      // increasing after scaleDown, which raises the part's lower bound by one where the previous interval ends in the
+      // same 8-bit value (lower bound rounded up here). A part left with a single value there would become
+      // [v8 - 2, v8 - 1]: grain inside the hole. Such a part is left out.
+      const int lowestBelow = ( lower + ( 1 << shift ) - 1 ) >> shift;
+      const bool keepBelow = lowestBelow < v8 - 2;
       if( lower >= holeLow && upper <= holeHigh )
       {
         parameters[ 2 ][ i ] = 0;
       }
       else if( lower < holeLow && upper > holeHigh )
       {
+        if( !keepBelow )
+        {
+          parameters[ 0 ][ i ] = holeHigh + 1;
+          continue;
+        }
         parameters[ 1 ][ i ] = holeLow - 1;
         parameters[ 0 ].insert( parameters[ 0 ].begin() + i + 1, holeHigh + 1 );
         parameters[ 1 ].insert( parameters[ 1 ].begin() + i + 1, upper );
@@ -2543,7 +2554,14 @@ void FGAnalyzer::cutPlateauHoles( std::vector<std::vector<int>>& parameters, int
       }
       else if( lower < holeLow )
       {
-        parameters[ 1 ][ i ] = holeLow - 1;
+        if( keepBelow )
+        {
+          parameters[ 1 ][ i ] = holeLow - 1;
+        }
+        else
+        {
+          parameters[ 2 ][ i ] = 0;
+        }
       }
       else
       {
@@ -3186,10 +3204,12 @@ void FGAnalyzer::limitCutoff( ComponentID compId, int avgH, int avgV )
 }
 
 // Smooths the cut-offs over consecutive intervals with a [1 2 1] filter ([3 1] at the ends), in place as in VTM.
+// A single interval has no neighbour to smooth with: the [3 1] end filter would read the unused second interval's
+// values (0 from init, or stale ones from an earlier picture) and lower the cut-offs, below 2 at worst.
 void FGAnalyzer::limitCutoffConsecutive( ComponentID compId )
 {
   SeiFgc::CompModel& cm = m_compModel[ compId ];
-  if( !cm.presentFlag )
+  if( !cm.presentFlag || cm.numIntensityIntervals < 2 )
   {
     return;
   }
