@@ -450,10 +450,11 @@ CuTree::~CuTree()
 }
 
 // The most pictures from a picture to the next intra picture: the intra period. An encoder change that can delay a
-// refresh beyond the intra period must add that delay here.
+// refresh beyond the intra period must add that delay here: adaptive intra refresh (AdaptiveIntra 1) lets a periodic
+// refresh due less than a GOP before a known cut wait for the cut (GOPCfg::getNextGopEntry), at most GOPSize - 1 pictures.
 static int maxPicsToNextIntra( const VVEncCfg& encCfg )
 {
-  return encCfg.m_IntraPeriod;
+  return encCfg.m_IntraPeriod + ( encCfg.m_adaptiveIntra == 1 ? encCfg.m_GOPSize - 1 : 0 );
 }
 
 int CuTree::getNumLookAheadPics( const VVEncCfg& encCfg )

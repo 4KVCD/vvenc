@@ -826,18 +826,18 @@ namespace DQIntern
     const int       qpDQ = cQP.Qp( false ) + 1;
     const CompArea& area = tu.blocks[compID];
     QuantBlockMemo::Entry& kept = memo.entry[toChannelType( compID )][Log2( area.width ) + Log2( area.height )];
-    const bool psy = usesPsyRdoq( tu, compID );
-    if( kept.qpDQ == qpDQ && kept.lambda == lambda && kept.psy == psy )
+    const double psyStrength = usesPsyRdoq( tu, compID ) ? m_psyRdoqStrength : 0.0;
+    if( kept.qpDQ == qpDQ && kept.lambda == lambda && kept.psyStrength == psyStrength )
     {
       static_cast<QuantBlockParams&>( *this ) = kept.params;
       return;
     }
     initQuantBlock( tu, compID, cQP, lambda );
     m_thresDefault = TCoeff( m_thresLast / ( TCoeff( m_QScale ) << 2 ) );
-    kept.qpDQ      = qpDQ;
-    kept.lambda    = lambda;
-    kept.psy       = psy;
-    kept.params    = *this;
+    kept.qpDQ        = qpDQ;
+    kept.lambda      = lambda;
+    kept.psyStrength = psyStrength;
+    kept.params      = *this;
   }
 
   void dequantCoeffs( const TCoeffSig* qCoeff, TCoeff* tCoeff, const ScanElement* scan, int lastScanIdx, int /*width*/, int /*height*/,

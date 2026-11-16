@@ -226,6 +226,7 @@ void EncGOP::init( const VVEncCfg& encCfg, const GOPCfg* gopCfg, RateCtrl& rateC
   {
     std::lock_guard<std::mutex> lock( m_gopEncMutex );
     pic.picApsGlobal->initalized = true;
+    m_numApsReady++;
     m_gopEncCond.notify_one();
   };
 
@@ -377,9 +378,10 @@ bool EncGOP::waitForFreeEncoders()
   CHECK( m_pcEncCfg->m_numThreads <= 0, "run into MT code, but no threading enabled" );
   // Return as soon as a picture finished since the last return. A finish after the GOP pass released the lock and
   // before this wait notifies nobody; without the predicate the main thread would sleep until the next finish while
-  // the freed encoder and the pictures waiting for that one stay idle.
-  m_gopEncCond.wait( lock, [this] { return m_numPicsFinished != m_numPicsFinishedWaited; } );
+  // the freed encoder and the pictures waiting for that one stay idle. An ALF-APS hand-over (apsReady) wakes it the same way.
+  m_gopEncCond.wait( lock, [this] { return m_numPicsFinished != m_numPicsFinishedWaited || m_numApsReady != m_numApsReadyWaited; } );
   m_numPicsFinishedWaited = m_numPicsFinished;
+  m_numApsReadyWaited     = m_numApsReady;
   return true;
 }
 

@@ -293,16 +293,18 @@ namespace DQIntern
   };
 
   // The memo of Quantizer::initQuantBlock with no gValue. With the transform skip path excluded, the result depends
-  // only on the channel type, the block size, QP and lambda, and on values fixed for the sequence, and those four rarely
-  // change from one block of a size to the next. Log2( width ) + Log2( height ) is enough for the size: it gives the transform
-  // shift and whether the sqrt(2) adjustment applies.
+  // only on the channel type, the block size, QP, lambda and psy-rdoq's strength, and on values fixed for the sequence,
+  // and those rarely change from one block of a size to the next. Log2( width ) + Log2( height ) is enough for the size:
+  // it gives the transform shift and whether the sqrt(2) adjustment applies.
   struct QuantBlockMemo
   {
     struct Entry
     {
       double           lambda = 0;
       int              qpDQ   = std::numeric_limits<int>::min();
-      bool             psy    = false;   // psy-rdoq applies to the block (its credit and threshold are in params)
+      // psy-rdoq's strength when it applies to the block, else 0: its credit and threshold are in params, and the
+      // strength changes per picture (EncSlice::getPsyRdoqStrength), so it is part of the key
+      double           psyStrength = 0;
       QuantBlockParams params;
     };
     Entry entry[ MAX_NUM_CH ][ 2 * 6 + 1 ];
