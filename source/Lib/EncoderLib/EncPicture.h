@@ -95,7 +95,8 @@ class EncPicture
                                   ThreadRsrcPool& threadRsrc,
                                   std::function<void( Picture& )> apsReady );
     void compressPicture        ( Picture& pic, EncGOP& gopEncoder );
-    void finalizePicture        ( Picture& pic );
+    void finalizeReference      ( Picture& pic );   // first: what the referencing pictures read (then isReconstructed)
+    void finalizePicture        ( Picture& pic );   // then: slice data, distortion, cleanup (then isEncoded)
 
   protected:
     void xCopyApsToGlobal       ( Picture& pic );
