@@ -182,9 +182,43 @@ static inline int columnVerticalError_common( const Pel* org, const ptrdiff_t or
   return squares.sum();
 }
 
+// MCTF::m_filterColumn4, as filterColumn4_AVX2 (MCTFX86.h): the horizontal 4-tap pass of numRows rows into filtered
+// (stride w), row r from source row r - 1, taps on columns x - 1 .. x + 2. The sums are 32 bits (exact for every 16-bit
+// input, as the C code's int sums), rounded and clipped to [0, max] by vqrshrun_n_s32 and the min.
+static inline void filterColumn4_common( const Pel* buf, const ptrdiff_t buffStride, const int w, const int numRows,
+                                         const int16_t* xFilter, const int bitDepth, Pel* filtered )
+{
+  // MCTFUnitSize is at most 32 (vvencCfg); a column holds h + 3 rows plus a one-row spread of its vectors
+  CHECKD( w > 32 || numRows > 36 || ( w & 7 ) != 0, "Unsupported block size" );
+
+  const int16x4_t  xf   = vld1_s16( xFilter );
+  const uint16x8_t vmax = vdupq_n_u16( ( 1 << bitDepth ) - 1 );
+  for( int r = 0; r < numRows; r++ )
+  {
+    const Pel* src = buf + ( r - 1 ) * buffStride - 1;
+    for( int x = 0; x < w; x += 8 )
+    {
+      int16x8_t s[4];
+      load_s16_16x8x4( src + x, 1, s );
+      int32x4_t lo = vmull_lane_s16( vget_low_s16( s[0] ), xf, 0 );
+      int32x4_t hi = vmull_lane_s16( vget_high_s16( s[0] ), xf, 0 );
+      lo = vmlal_lane_s16( lo, vget_low_s16( s[1] ), xf, 1 );
+      hi = vmlal_lane_s16( hi, vget_high_s16( s[1] ), xf, 1 );
+      lo = vmlal_lane_s16( lo, vget_low_s16( s[2] ), xf, 2 );
+      hi = vmlal_lane_s16( hi, vget_high_s16( s[2] ), xf, 2 );
+      lo = vmlal_lane_s16( lo, vget_low_s16( s[3] ), xf, 3 );
+      hi = vmlal_lane_s16( hi, vget_high_s16( s[3] ), xf, 3 );
+      // ( sum + 32 ) >> 6, clipped to [0, max]
+      const uint16x8_t v = vminq_u16( vcombine_u16( vqrshrun_n_s32( lo, 6 ), vqrshrun_n_s32( hi, 6 ) ), vmax );
+      vst1q_s16( filtered + r * w + x, vreinterpretq_s16_u16( v ) );
+    }
+  }
+}
+
 // MCTF::m_motionErrorLumaFracColumn, as motionErrorLumaFracColumn_loRes_AVX2 (MCTFX86.h): the exact errors of num
-// vectors with the same horizontal position, from the rows of m_filterColumn4 (filterColumn4_neon): the vertical pass
-// per vector, rowOffset[i] rows lower (a vector reads h + 3 rows from there).
+// vectors with the same horizontal position, from the rows of m_filterColumn4 (filterColumn4_common): the vertical pass
+// per vector, rowOffset[i] rows lower (a vector reads h + 3 rows from there), from samples clipped to [0, max] as
+// motionErrorLumaFrac_loRes2D_neon does it.
 template<typename SquareSum>
 static inline void motionErrorLumaFracColumn_loRes_common( const Pel* org, const ptrdiff_t origStride, const Pel* filtered,
                                                            const int w, const int h, const int num,

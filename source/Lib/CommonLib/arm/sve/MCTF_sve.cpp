@@ -275,7 +275,6 @@ struct SquareSumSve
   int sum() const { return ( int )vaddvq_s64( acc ); }
 };
 
-// the vertical half of the column kernel; its horizontal half stays the NEON one (m_filterColumn4, set by the NEON init)
 static void motionErrorLumaFracColumn_loRes_sve( const Pel* org, const ptrdiff_t origStride, const Pel* filtered,
                                                  const int w, const int h, const int num, const int16_t* const* yFilter,
                                                  const int* rowOffset, const int bitDepth, int* error )
@@ -624,6 +623,7 @@ void MCTF::_initMCTF_ARM<SVE>()
 {
   m_motionErrorLumaInt8 = motionErrorLumaInt_sve;
   m_motionErrorLumaFrac8[1] = motionErrorLumaFrac_loRes_sve;
+  m_filterColumn4             = filterColumn4_common;
   m_motionErrorLumaFracColumn = motionErrorLumaFracColumn_loRes_sve;
   m_applyPlanarCorrection = applyPlanarCorrection_sve;
   m_applyBlock = applyBlock_sve;
