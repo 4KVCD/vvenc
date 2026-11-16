@@ -3552,7 +3552,8 @@ int FGAnalyzer::equalPowerScale( int s, bool chroma420, int h0, int w0, int h, i
 
 int FGAnalyzer::lostGrainCapScale( int s0, bool chroma420, int h0, int w0, int h, int w )
 {
-  return std::min( MAX_STANDARD_DEVIATION, (int) ( equalPowerScale( s0, chroma420, h0, w0, h, w ) * std::sqrt( LOST_GRAIN_CAP_POWER ) + 0.5 ) );
+  // never above MAX_SCALING_FACTOR, like every scaling factor the analyzer signals (vvdec's x86 synthesis sign-extends 128 and up)
+  return std::min( MAX_SCALING_FACTOR, (int) ( equalPowerScale( s0, chroma420, h0, w0, h, w ) * std::sqrt( LOST_GRAIN_CAP_POWER ) + 0.5 ) );
 }
 
 // The u + v frequency groups of the fit: 1-2, 3-5, 6-8, 9-12, 13-30 (the group of DCT coefficient k of a 16x16 block).

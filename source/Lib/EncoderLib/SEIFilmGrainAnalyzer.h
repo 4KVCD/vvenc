@@ -184,7 +184,7 @@ public:
   // 0.71-0.72; the overshoot-weighted cost still holds the fit where it is not bound.
   static constexpr double LOST_GRAIN_CAP_POWER = 4.0;
   // The largest scaling factor the fit may give at cut-offs (h, w): LOST_GRAIN_CAP_POWER times the power of the analyzer's
-  // scale s0 at (h0, w0).
+  // scale s0 at (h0, w0), at most 127 (the largest scaling factor the analyzer signals).
   static int lostGrainCapScale( int s0, bool chroma420, int h0, int w0, int h, int w );
 
   // The grain the synthesis makes with a filter of the auto-regressive model (--fga 3): its standard deviation per unit
