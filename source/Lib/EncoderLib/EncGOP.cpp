@@ -1667,10 +1667,9 @@ void EncGOP::xSetupPicAps( Picture* pic )
 
   // The list is kept near this size; the +2 covers up to two GOPs of processing delay (Threads=1 mode). The pictures in
   // flight are not bounded by this size (GOP read-ahead, look-ahead stages), so an entry is deleted only after its last
-  // use: no picture set up later references it, and its own picture has filled it (initalized: set after
-  // finalizeReference copied the APSs, or with IFP after the copy at the ALF derivation; nothing writes the entry
-  // after that). (Pictures skipped in a first pass never finish, but they have no entry: the first pass runs without
-  // ALF.)
+  // use: no picture set up later references it, and its own picture has filled it (initalized: finalizeReference wrote
+  // it before, or with IFP the copy at the ALF derivation; nothing writes it after). (Pictures skipped in a first pass
+  // never finish, but they have no entry: the first pass runs without ALF.)
   const size_t maxListSize = std::max( (int)MAX_NUM_APS, m_pcEncCfg->m_GOPSize ) * ( m_pcEncCfg->m_maxParallelFrames + 2 );
   if( m_globalApsList.size() > maxListSize )
   {
