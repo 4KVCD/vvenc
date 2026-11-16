@@ -383,8 +383,10 @@ void EncLib::xDecideVeryLowQP()
 {
   VVEncCfg& cfg = const_cast<VVEncCfg&>(m_encCfg);
   // the options the config left at 2 (below QP 16). getBaseQP() leans towards a QP from the resolution, so at these
-  // targets the pictures run lower than it says: one higher than constant QP's limit
-  const bool veryLowQP = getCodingQp( m_encCfg ) <= VVENC_VERY_LOW_QP;
+  // targets the pictures run lower than it says: one higher than constant QP's limit. m_QP here is getBaseQP(), the QP
+  // the pictures are coded at, and m_orgCfg.m_QP is already the coding QP (VVEncCfg::xInitCfgMembers): no getCodingQp()
+  // offset on top of either
+  const bool veryLowQP = m_encCfg.m_QP <= VVENC_VERY_LOW_QP;
 
   if( cfg.m_MTSImplicit == 2 )
   {
@@ -406,11 +408,11 @@ void EncLib::xDecideVeryLowQP()
     // Strengths still at what config derived from its guess of the QP, which at high targets is far too low: nothing would be
     // filtered, so nothing kept. Strengths the user chose differ from these and stay. Config runs twice, so it can't tell them apart.
     vvencMCTF fromGuess = cfg.m_vvencMCTF;
-    initMCTFStrengths( fromGuess, cfg.m_GOPSize, getCodingQp( m_orgCfg ), cfg.m_QPFractionVal, true );
+    initMCTFStrengths( fromGuess, cfg.m_GOPSize, m_orgCfg.m_QP, cfg.m_QPFractionVal, true );
     const bool strengthsDerived = fromGuess.numFrames == cfg.m_vvencMCTF.numFrames && std::equal( fromGuess.MCTFStrengths, fromGuess.MCTFStrengths + fromGuess.numFrames, cfg.m_vvencMCTF.MCTFStrengths );
     if( veryLowQP && strengthsDerived )
     {
-      initMCTFStrengths( cfg.m_vvencMCTF, cfg.m_GOPSize, getCodingQp( cfg ), cfg.m_QPFractionVal, true );
+      initMCTFStrengths( cfg.m_vvencMCTF, cfg.m_GOPSize, cfg.m_QP, cfg.m_QPFractionVal, true );
     }
   }
 }

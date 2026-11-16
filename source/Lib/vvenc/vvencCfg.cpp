@@ -872,6 +872,7 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
 
   vvenc_confirmParameter( c, c->m_RCTargetBitrate == VVENC_RC_OFF && ( c->m_QP < 0 || c->m_QP > vvenc::MAX_QP ), "QP exceeds supported range (0 to 63)" );
   vvenc_confirmParameter( c, c->m_QPFractionVal > 0 && c->m_QP >= vvenc::MAX_QP, "Fractional QP exceeds supported range (0 to 63)" );
+  vvenc_confirmParameter( c, c->m_flatInterQP < 0 || c->m_flatInterQP > 1, "FlatInterQP must be 0 or 1" );
   vvenc_confirmParameter( c, c->m_flatInterQP && c->m_usePerceptQPA, "FlatInterQP needs QPA off (--qpa 0): QPA sets its own QP per temporal layer" );
   vvenc_confirmParameter( c, c->m_ccalfOnly < 0 || c->m_ccalfOnly > 1, "CCALFOnly must be 0 or 1" );
   vvenc_confirmParameter( c, c->m_levelLambdaVal == 0, "LevelLambda must be above 0 (up to 3.98)" );
