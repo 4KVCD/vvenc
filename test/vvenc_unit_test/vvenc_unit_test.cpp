@@ -7334,191 +7334,6 @@ static bool test_AdaptiveLoopFilter()
 
 #if ENABLE_SIMD_OPT_SAO
 
-template<typename G>
-static bool check_SAOcalcSaoStatisticsBo( SampleAdaptiveOffset* ref, SampleAdaptiveOffset* opt, int bd, G src_generator,
-                                          G org_generator )
-{
-  bool passed = true;
-  const unsigned blk_size = MAX_CU_SIZE * MAX_CU_SIZE;
-  const int srcStride = MAX_CU_SIZE;
-  const int orgStride = MAX_CU_SIZE;
-  std::vector<Pel> srcBlk( blk_size );
-  std::vector<Pel> orgBlk( blk_size );
-  std::vector<int64_t> countRef( NUM_SAO_BO_CLASSES );
-  std::vector<int64_t> diffRef( NUM_SAO_BO_CLASSES );
-  std::vector<int64_t> countOpt( NUM_SAO_BO_CLASSES );
-  std::vector<int64_t> diffOpt( NUM_SAO_BO_CLASSES );
-
-  std::ostringstream sstm_test;
-  sstm_test << "SampleAdaptiveOffset::calcSaoStatisticsBo " << bd << " bit";
-  std::cout << "Testing " << sstm_test.str() << '\n';
-
-  // widths 8, 24 and 40 leave samples beyond the last whole 16 (8: all of them)
-  for( unsigned width : { 8, 24, 32, 40, 64, 128 } )
-  {
-    for( unsigned height : { 32, 64, 128 } )
-    {
-      std::generate( srcBlk.begin(), srcBlk.end(), src_generator );
-      std::generate( orgBlk.begin(), orgBlk.end(), org_generator );
-
-      for( int skipLinesX : { 0, 3, 5 } )
-      {
-        for( int skipLinesY : { 0, 2, 4 } )
-        {
-          // endX is the same, or -3, or -5 of the width.
-          int endX = width - skipLinesX;
-          // endY is the same, or -2, or -4 of the height.
-          int endY = height - skipLinesY;
-
-          std::fill( countRef.begin(), countRef.end(), 0 );
-          std::fill( diffRef.begin(), diffRef.end(), 0 );
-          std::fill( countOpt.begin(), countOpt.end(), 0 );
-          std::fill( diffOpt.begin(), diffOpt.end(), 0 );
-
-          ref->calcSaoStatisticsBo( width, endX, endY, srcBlk.data(), orgBlk.data(), srcStride, orgStride, bd,
-                                    countRef.data(), diffRef.data() );
-          opt->calcSaoStatisticsBo( width, endX, endY, srcBlk.data(), orgBlk.data(), srcStride, orgStride, bd,
-                                    countOpt.data(), diffOpt.data() );
-
-          std::ostringstream sstm_subtest;
-          sstm_subtest << sstm_test.str() << " width=" << width << " endX=" << endX << " endY=" << endY;
-
-          passed =
-              compare_values_1d( sstm_subtest.str(), countRef.data(), countOpt.data(), NUM_SAO_BO_CLASSES ) && passed;
-          passed =
-              compare_values_1d( sstm_subtest.str(), diffRef.data(), diffOpt.data(), NUM_SAO_BO_CLASSES ) && passed;
-        }
-      }
-    }
-  }
-  return passed;
-}
-
-// The four edge offset statistics functions, called with the inputs EncSampleAdaptiveOffset::getBlkStats prepares: its
-// ranges for each neighbour availability, the sign line of the second row for Eo135 / Eo45, and for those two the stats
-// offset by 2 and already holding the first row's. Width 24 compares the scalar code with itself; the others compare it
-// with the SIMD level under test.
-static bool check_SAOcalcSaoStatisticsEo( SampleAdaptiveOffset* ref, SampleAdaptiveOffset* opt, int bd )
-{
-  bool passed = true;
-  std::cout << "Testing SampleAdaptiveOffset::calcSaoStatisticsEo0/90/135/45 " << bd << " bit\n";
-  // the functions read the rows above and below and a sample left and right of the block (a whole vector further
-  // right on the SIMD paths)
-  const int margin    = 16;
-  const int srcStride = MAX_CU_SIZE + 2 * margin;
-  const int orgStride = MAX_CU_SIZE;
-  std::vector<Pel> srcBuf( srcStride * ( MAX_CU_SIZE + 2 ) );
-  std::vector<Pel> orgBlk( orgStride * MAX_CU_SIZE );
-  Pel* const srcBlk = srcBuf.data() + srcStride + margin;
-  const int maxVal  = ( 1 << bd ) - 1;
-  // sample sets: values 0..3 (many equal neighbours: the plain and half-edge classes), flat, the two extremes, any value
-  const char* setNames[] = { "low", "flat", "extremes", "random" };
-  auto sample = [maxVal]( int set ) {
-    return Pel( set == 0 ? rand() & 3 : set == 1 ? maxVal / 2 : set == 2 ? ( rand() & 1 ) * maxVal : rand() & maxVal );
-  };
-
-  struct BlockSize
-  {
-    int width, height;
-  };
-  // width 24 takes the scalar code; height 4 leaves no row below a luma skip
-  const BlockSize sizes[] = { { 16, 4 }, { 16, 16 }, { 24, 8 }, { 32, 32 }, { 64, 64 }, { 128, 128 } };
-  const char* dirNames[]  = { "Eo0", "Eo90", "Eo135", "Eo45" };
-
-  for( int set = 0; set < 4; set++ )
-  {
-    std::generate( srcBuf.begin(), srcBuf.end(), [&] { return sample( set ); } );
-    std::generate( orgBlk.begin(), orgBlk.end(), [&] { return sample( set == 2 ? 2 : 3 ); } );
-
-    for( const BlockSize& size : sizes )
-    {
-      const int width = size.width, height = size.height;
-      for( const bool isLuma : { true, false } )
-      {
-        // neighbour availability bits: 1 left, 2 right, 4 above, 8 below
-        for( const int avail : { 15, 0, 5, 10 } )
-        {
-          const int skipLinesR = isLuma ? 5 : 3;
-          const int skipLinesB = isLuma ? 4 : 2;
-          const int startX     = ( avail & 1 ) ? 0 : 1;
-          const int endX       = ( avail & 2 ) ? width - skipLinesR : width - 1;
-          const int endXEo90   = ( avail & 2 ) ? width - skipLinesR : width;
-          const int startYEo90 = ( avail & 4 ) ? 0 : 1;
-          const int endYEo0    = ( avail & 8 ) ? height - skipLinesB : height;
-          const int endY       = ( avail & 8 ) ? height - skipLinesB : height - 1;
-
-          for( int dir = 0; dir < 4; dir++ )
-          {
-            // the first row's stats for Eo135 / Eo45, which their callers gather before; Eo0 / Eo90 start from 0
-            const bool diagonal = dir >= 2;
-            std::vector<int64_t> countRef( NUM_SAO_EO_CLASSES, diagonal ? 9 : 0 );
-            std::vector<int64_t> diffRef( NUM_SAO_EO_CLASSES, diagonal ? -21 : 0 );
-            std::vector<int64_t> countOpt = countRef, diffOpt = diffRef;
-            std::vector<int8_t> signUpRef( MAX_CU_SIZE + 2 ), signDownRef( MAX_CU_SIZE + 2 );
-            std::vector<int8_t> signDownOpt( MAX_CU_SIZE + 2 );
-
-            Pel* const secondRow    = srcBlk + srcStride;
-            Pel* const orgSecondRow = orgBlk.data() + orgStride;
-            if( dir == 2 )
-            {
-              for( int x = startX; x <= endX; x++ )
-              {
-                signUpRef[x] = int8_t( sgn( secondRow[x] - srcBlk[x - 1] ) );
-              }
-            }
-            else if( dir == 3 )
-            {
-              // Eo45's sign line starts at index -1
-              for( int x = startX - 1; x < endX; x++ )
-              {
-                signUpRef[x + 1] = int8_t( sgn( secondRow[x] - srcBlk[x + 1] ) );
-              }
-            }
-            std::vector<int8_t> signUpOpt = signUpRef;
-
-            SampleAdaptiveOffset* const sao[2] = { ref, opt };
-            int64_t* const count[2]            = { countRef.data(), countOpt.data() };
-            int64_t* const diff[2]             = { diffRef.data(), diffOpt.data() };
-            int8_t* const signUp[2]            = { signUpRef.data(), signUpOpt.data() };
-            int8_t* const signDown[2]          = { signDownRef.data(), signDownOpt.data() };
-            for( int i = 0; i < 2; i++ )
-            {
-              switch( dir )
-              {
-              case 0:
-                sao[i]->calcSaoStatisticsEo0( width, startX, endX, endYEo0, srcBlk, orgBlk.data(), srcStride, orgStride,
-                                              count[i], diff[i] );
-                break;
-              case 1:
-                // without the row above, the function starts at the second row
-                sao[i]->calcSaoStatisticsEo90( width, endXEo90, startYEo90, endY, srcBlk + startYEo90 * srcStride,
-                                               orgBlk.data() + startYEo90 * orgStride, srcStride, orgStride, count[i],
-                                               diff[i], signUp[i] );
-                break;
-              case 2:
-                sao[i]->calcSaoStatisticsEo135( width, startX, endX, endY, secondRow, orgSecondRow, srcStride, orgStride,
-                                                count[i] + 2, diff[i] + 2, signUp[i], signDown[i] );
-                break;
-              default:
-                sao[i]->calcSaoStatisticsEo45( width, startX, endX, endY, secondRow, orgSecondRow, srcStride, orgStride,
-                                               count[i] + 2, diff[i] + 2, signUp[i] + 1 );
-              }
-            }
-
-            std::ostringstream sstm_subtest;
-            sstm_subtest << "SampleAdaptiveOffset::calcSaoStatistics" << dirNames[dir] << " " << bd << " bit "
-                         << setNames[set] << " width=" << width << " height=" << height << " luma=" << isLuma
-                         << " avail=" << avail;
-            passed = compare_values_1d( sstm_subtest.str(), countRef.data(), countOpt.data(), NUM_SAO_EO_CLASSES ) && passed;
-            passed = compare_values_1d( sstm_subtest.str(), diffRef.data(), diffOpt.data(), NUM_SAO_EO_CLASSES ) && passed;
-          }
-        }
-      }
-    }
-  }
-  return passed;
-}
-
 // SampleAdaptiveOffset::offsetBlock is protected: a subclass to reach it
 struct SaoOffsetBlockAccess : public SampleAdaptiveOffset
 {
@@ -7620,6 +7435,360 @@ static bool check_SAOoffsetBlock( SaoOffsetBlockAccess* ref, SaoOffsetBlockAcces
   return true;
 }
 
+
+template<typename G>
+static bool check_SAOcalcSaoStatisticsBo( SampleAdaptiveOffset* ref, SampleAdaptiveOffset* opt, int bd, G src_generator,
+                                          G org_generator )
+{
+  bool passed = true;
+  const unsigned blk_size = MAX_CU_SIZE * MAX_CU_SIZE;
+  const int srcStride = MAX_CU_SIZE;
+  const int orgStride = MAX_CU_SIZE;
+  std::vector<Pel> srcBlk( blk_size );
+  std::vector<Pel> orgBlk( blk_size );
+  std::vector<int64_t> countRef( NUM_SAO_BO_CLASSES );
+  std::vector<int64_t> diffRef( NUM_SAO_BO_CLASSES );
+  std::vector<int64_t> countOpt( NUM_SAO_BO_CLASSES );
+  std::vector<int64_t> diffOpt( NUM_SAO_BO_CLASSES );
+
+  std::ostringstream sstm_test;
+  sstm_test << "SampleAdaptiveOffset::calcSaoStatisticsBo " << bd << " bit";
+  std::cout << "Testing " << sstm_test.str() << '\n';
+
+  // widths 8, 24 and 40 leave samples beyond the last whole 16 (8: all of them)
+  for( unsigned width : { 8, 24, 32, 40, 64, 128 } )
+  {
+    for( unsigned height : { 32, 64, 128 } )
+    {
+      std::generate( srcBlk.begin(), srcBlk.end(), src_generator );
+      std::generate( orgBlk.begin(), orgBlk.end(), org_generator );
+
+      for( int skipLinesX : { 0, 3, 5 } )
+      {
+        for( int skipLinesY : { 0, 2, 4 } )
+        {
+          // endX is the same, or -3, or -5 of the width.
+          int endX = width - skipLinesX;
+          // endY is the same, or -2, or -4 of the height.
+          int endY = height - skipLinesY;
+
+          std::fill( countRef.begin(), countRef.end(), 0 );
+          std::fill( diffRef.begin(), diffRef.end(), 0 );
+          std::fill( countOpt.begin(), countOpt.end(), 0 );
+          std::fill( diffOpt.begin(), diffOpt.end(), 0 );
+
+          ref->calcSaoStatisticsBo( width, endX, endY, srcBlk.data(), orgBlk.data(), srcStride, orgStride, bd,
+                                    countRef.data(), diffRef.data() );
+          opt->calcSaoStatisticsBo( width, endX, endY, srcBlk.data(), orgBlk.data(), srcStride, orgStride, bd,
+                                    countOpt.data(), diffOpt.data() );
+
+          std::ostringstream sstm_subtest;
+          sstm_subtest << sstm_test.str() << " width=" << width << " endX=" << endX << " endY=" << endY;
+
+          passed =
+              compare_values_1d( sstm_subtest.str(), countRef.data(), countOpt.data(), NUM_SAO_BO_CLASSES ) && passed;
+          passed =
+              compare_values_1d( sstm_subtest.str(), diffRef.data(), diffOpt.data(), NUM_SAO_BO_CLASSES ) && passed;
+        }
+      }
+    }
+  }
+  return passed;
+}
+
+template<typename G>
+static bool check_SAOcalcSaoStatisticsEo0( SampleAdaptiveOffset* ref, SampleAdaptiveOffset* opt, int bd,
+                                           G src_generator, G org_generator, int orgStrideExtra = 0 )
+{
+  bool passed = true;
+  const int margin = 1; // calcSaoStatisticsEo0 reads one sample left/right of [0, width)
+
+  std::ostringstream sstm_test;
+  sstm_test << "SampleAdaptiveOffset::calcSaoStatisticsEo0 " << bd << " bit";
+  std::cout << "Testing " << sstm_test.str() << '\n';
+
+  for( unsigned width : { 15, 16, 17, 24, 31, 32, 33, 63, 64, 65, 128 } )
+  {
+    const int srcStride = width + 2 * margin;
+    const int orgStride = width + orgStrideExtra;
+    // extra row keeps the final row-pointer increment within the allocation
+    std::vector<Pel> srcBlk( srcStride * ( MAX_CU_SIZE + 1 ) );
+    std::vector<Pel> orgBlk( orgStride * ( MAX_CU_SIZE + 1 ) );
+
+    for( unsigned endY : { 1u, 2u, (unsigned)( MAX_CU_SIZE / 2 ), (unsigned)MAX_CU_SIZE } )
+    {
+      for( int startX : { 0, 1 } )
+      {
+        for( int naRight : { 0, 1, 3, 5, 7, 8 } )
+        {
+          if( naRight >= (int)width - startX )
+          {
+            continue;
+          }
+
+          std::generate( srcBlk.begin(), srcBlk.end(), src_generator );
+          std::generate( orgBlk.begin(), orgBlk.end(), org_generator );
+
+          const int endX = width - naRight;
+
+          std::vector<int64_t> countRef( NUM_SAO_EO_CLASSES, 0 );
+          std::vector<int64_t> diffRef( NUM_SAO_EO_CLASSES, 0 );
+          std::vector<int64_t> countOpt( NUM_SAO_EO_CLASSES, 0 );
+          std::vector<int64_t> diffOpt( NUM_SAO_EO_CLASSES, 0 );
+
+          ref->calcSaoStatisticsEo0( width, startX, endX, endY, srcBlk.data() + margin, orgBlk.data(), srcStride,
+                                     orgStride, countRef.data(), diffRef.data() );
+          opt->calcSaoStatisticsEo0( width, startX, endX, endY, srcBlk.data() + margin, orgBlk.data(), srcStride,
+                                     orgStride, countOpt.data(), diffOpt.data() );
+
+          std::ostringstream sstm_subtest;
+          sstm_subtest << sstm_test.str() << " width=" << width << " startX=" << startX << " endX=" << endX
+                       << " endY=" << endY;
+
+          passed = compare_values_1d( sstm_subtest.str(), countRef.data(), countOpt.data(), NUM_SAO_EO_CLASSES ) &&
+                   passed;
+          passed = compare_values_1d( sstm_subtest.str(), diffRef.data(), diffOpt.data(), NUM_SAO_EO_CLASSES ) &&
+                   passed;
+
+          // independent check: the bins must account for exactly the classified rectangle
+          int64_t countTotal = 0, diffTotal = 0;
+          for( int i = 0; i < NUM_SAO_EO_CLASSES; i++ )
+          {
+            countTotal += countOpt[i];
+            diffTotal += diffOpt[i];
+          }
+          int64_t expectedDiff = 0;
+          for( unsigned y = 0; y < endY; y++ )
+          {
+            for( int x = startX; x < endX; x++ )
+            {
+              expectedDiff += orgBlk[y * orgStride + x] - srcBlk[margin + y * srcStride + x];
+            }
+          }
+          const int64_t expectedCount[1] = { (int64_t)( endX - startX ) * endY };
+          const int64_t expectedDiffArr[1] = { expectedDiff };
+          passed = compare_values_1d( sstm_subtest.str() + " count total", expectedCount, &countTotal, 1 ) && passed;
+          passed = compare_values_1d( sstm_subtest.str() + " diff total", expectedDiffArr, &diffTotal, 1 ) && passed;
+        }
+      }
+    }
+  }
+  return passed;
+}
+
+template<typename G>
+static bool check_SAOcalcSaoStatisticsEo90( SampleAdaptiveOffset* ref, SampleAdaptiveOffset* opt, int bd,
+                                            G src_generator, G org_generator )
+{
+  bool passed = true;
+  const int margin = 1; // one row of margin above the first processed row and below the last
+
+  std::ostringstream sstm_test;
+  sstm_test << "SampleAdaptiveOffset::calcSaoStatisticsEo90 " << bd << " bit";
+  std::cout << "Testing " << sstm_test.str() << '\n';
+
+  for( unsigned width : { 15, 16, 17, 24, 31, 32, 33, 63, 64, 65, 128 } )
+  {
+    const int srcStride = width;
+    const int orgStride = width;
+    std::vector<Pel> srcBlk( srcStride * ( MAX_CU_SIZE + 2 ) );
+    std::vector<Pel> orgBlk( orgStride * MAX_CU_SIZE );
+    std::vector<int8_t> signUpLineRef( width ), signUpLineOpt( width );
+
+    for( unsigned endY : { 1u, 2u, (unsigned)( MAX_CU_SIZE / 2 ), (unsigned)MAX_CU_SIZE } )
+    {
+      for( int startY : { 0, 1 } )
+      {
+        if( (unsigned)startY >= endY )
+        {
+          continue;
+        }
+        for( int naRight : { 0, 1, 3, 5, 7, 8 } )
+        {
+          if( naRight >= (int)width )
+          {
+            continue;
+          }
+
+          std::generate( srcBlk.begin(), srcBlk.end(), src_generator );
+          std::generate( orgBlk.begin(), orgBlk.end(), org_generator );
+
+          const int endX = width - naRight;
+
+          std::vector<int64_t> countRef( NUM_SAO_EO_CLASSES, 0 );
+          std::vector<int64_t> diffRef( NUM_SAO_EO_CLASSES, 0 );
+          std::vector<int64_t> countOpt( NUM_SAO_EO_CLASSES, 0 );
+          std::vector<int64_t> diffOpt( NUM_SAO_EO_CLASSES, 0 );
+
+          Pel* srcPtr = srcBlk.data() + margin * srcStride;
+          ref->calcSaoStatisticsEo90( width, endX, startY, endY, srcPtr, orgBlk.data(), srcStride, orgStride,
+                                       countRef.data(), diffRef.data(), signUpLineRef.data() );
+          opt->calcSaoStatisticsEo90( width, endX, startY, endY, srcPtr, orgBlk.data(), srcStride, orgStride,
+                                       countOpt.data(), diffOpt.data(), signUpLineOpt.data() );
+
+          std::ostringstream sstm_subtest;
+          sstm_subtest << sstm_test.str() << " width=" << width << " endX=" << endX << " startY=" << startY
+                       << " endY=" << endY;
+
+          passed = compare_values_1d( sstm_subtest.str(), countRef.data(), countOpt.data(), NUM_SAO_EO_CLASSES ) &&
+                   passed;
+          passed = compare_values_1d( sstm_subtest.str(), diffRef.data(), diffOpt.data(), NUM_SAO_EO_CLASSES ) &&
+                   passed;
+        }
+      }
+    }
+  }
+  return passed;
+}
+
+template<typename G>
+static bool check_SAOcalcSaoStatisticsEo135( SampleAdaptiveOffset* ref, SampleAdaptiveOffset* opt, int bd,
+                                             G src_generator, G org_generator )
+{
+  bool passed = true;
+  const int margin = 1; // one column of margin left/right, one row of margin above/below
+
+  std::ostringstream sstm_test;
+  sstm_test << "SampleAdaptiveOffset::calcSaoStatisticsEo135 " << bd << " bit";
+  std::cout << "Testing " << sstm_test.str() << '\n';
+
+  for( unsigned width : { 15, 16, 17, 24, 31, 32, 33, 63, 64, 65, 128 } )
+  {
+    const int srcStride = width + 2 * margin;
+    const int orgStride = width;
+    std::vector<Pel> srcBlk( srcStride * ( MAX_CU_SIZE + 2 ) );
+    std::vector<Pel> orgBlk( orgStride * MAX_CU_SIZE );
+    // the scalar reference writes signDownLine[endX]
+    std::vector<int8_t> signUpLineRef( width + 1, 0 ), signUpLineOpt( width + 1, 0 );
+    std::vector<int8_t> signDownLineRef( width + 1, 0 ), signDownLineOpt( width + 1, 0 );
+
+    for( unsigned endY : { 2u, 3u, (unsigned)( MAX_CU_SIZE / 2 ), (unsigned)MAX_CU_SIZE } )
+    {
+      for( int startX : { 0, 1 } )
+      {
+        for( int naRight : { 0, 1, 3, 5, 7, 8 } )
+        {
+          if( naRight >= (int)width - startX )
+          {
+            continue;
+          }
+
+          std::generate( srcBlk.begin(), srcBlk.end(), src_generator );
+          std::generate( orgBlk.begin(), orgBlk.end(), org_generator );
+
+          const int endX = width - naRight;
+          Pel* srcPtr    = srcBlk.data() + margin * srcStride + margin;
+
+          // initialize the upper diagonal signs as getBlkStats does
+          for( int x = startX; x <= endX; x++ )
+          {
+            const int8_t v   = (int8_t)sgn( srcPtr[x] - srcPtr[x - 1 - srcStride] );
+            signUpLineRef[x] = v;
+            signUpLineOpt[x] = v;
+          }
+
+          // seeded non-zero so a kernel that overwrites instead of accumulating onto the caller's
+          // first-row totals (the real contract) would diverge from the reference, not just match it
+          const std::vector<int64_t> countSeed{ 10, 20, 30, 40, 50 };
+          const std::vector<int64_t> diffSeed{ 101, -202, 303, -404, 505 };
+          std::vector<int64_t> countRefBase = countSeed, diffRefBase = diffSeed;
+          std::vector<int64_t> countOptBase = countSeed, diffOptBase = diffSeed;
+
+          // pass bin-2 pointers, matching getBlkStats
+          ref->calcSaoStatisticsEo135( width, startX, endX, endY, srcPtr, orgBlk.data(), srcStride, orgStride,
+                                        countRefBase.data() + 2, diffRefBase.data() + 2, signUpLineRef.data(),
+                                        signDownLineRef.data() );
+          opt->calcSaoStatisticsEo135( width, startX, endX, endY, srcPtr, orgBlk.data(), srcStride, orgStride,
+                                        countOptBase.data() + 2, diffOptBase.data() + 2, signUpLineOpt.data(),
+                                        signDownLineOpt.data() );
+
+          std::ostringstream sstm_subtest;
+          sstm_subtest << sstm_test.str() << " width=" << width << " startX=" << startX << " endX=" << endX
+                       << " endY=" << endY;
+
+          passed = compare_values_1d( sstm_subtest.str(), countRefBase.data(), countOptBase.data(),
+                                       NUM_SAO_EO_CLASSES ) && passed;
+          passed = compare_values_1d( sstm_subtest.str(), diffRefBase.data(), diffOptBase.data(),
+                                       NUM_SAO_EO_CLASSES ) && passed;
+        }
+      }
+    }
+  }
+  return passed;
+}
+
+template<typename G>
+static bool check_SAOcalcSaoStatisticsEo45( SampleAdaptiveOffset* ref, SampleAdaptiveOffset* opt, int bd,
+                                            G src_generator, G org_generator )
+{
+  bool passed = true;
+  const int margin = 1; // one column of margin left/right, one row of margin above/below
+
+  std::ostringstream sstm_test;
+  sstm_test << "SampleAdaptiveOffset::calcSaoStatisticsEo45 " << bd << " bit";
+  std::cout << "Testing " << sstm_test.str() << '\n';
+
+  for( unsigned width : { 15, 16, 17, 24, 31, 32, 33, 63, 64, 65, 128 } )
+  {
+    const int srcStride = width + 2 * margin;
+    const int orgStride = width;
+    std::vector<Pel> srcBlk( srcStride * ( MAX_CU_SIZE + 2 ) );
+    std::vector<Pel> orgBlk( orgStride * MAX_CU_SIZE );
+    // allow signUpLine[-1], matching getBlkStats
+    std::vector<int8_t> signUpLineRefBase( width + 2, 0 ), signUpLineOptBase( width + 2, 0 );
+
+    for( unsigned endY : { 2u, 3u, (unsigned)( MAX_CU_SIZE / 2 ), (unsigned)MAX_CU_SIZE } )
+    {
+      for( int startX : { 0, 1 } )
+      {
+        for( int naRight : { 0, 1, 3, 5, 7, 8 } )
+        {
+          if( naRight >= (int)width - startX )
+          {
+            continue;
+          }
+
+          std::generate( srcBlk.begin(), srcBlk.end(), src_generator );
+          std::generate( orgBlk.begin(), orgBlk.end(), org_generator );
+
+          const int endX = width - naRight;
+          Pel* srcPtr    = srcBlk.data() + margin * srcStride + margin;
+
+          // initialize the upper diagonal signs as getBlkStats does
+          for( int x = startX - 1; x < endX; x++ )
+          {
+            const int8_t v           = (int8_t)sgn( srcPtr[x] - srcPtr[x + 1 - srcStride] );
+            signUpLineRefBase[x + 1] = v;
+            signUpLineOptBase[x + 1] = v;
+          }
+
+          // seeded non-zero so a kernel that overwrites instead of accumulating onto the caller's
+          // first-row totals (the real contract) would diverge from the reference, not just match it
+          const std::vector<int64_t> countSeed{ 10, 20, 30, 40, 50 };
+          const std::vector<int64_t> diffSeed{ 101, -202, 303, -404, 505 };
+          std::vector<int64_t> countRefBase = countSeed, diffRefBase = diffSeed;
+          std::vector<int64_t> countOptBase = countSeed, diffOptBase = diffSeed;
+
+          ref->calcSaoStatisticsEo45( width, startX, endX, endY, srcPtr, orgBlk.data(), srcStride, orgStride,
+                                       countRefBase.data() + 2, diffRefBase.data() + 2, signUpLineRefBase.data() + 1 );
+          opt->calcSaoStatisticsEo45( width, startX, endX, endY, srcPtr, orgBlk.data(), srcStride, orgStride,
+                                       countOptBase.data() + 2, diffOptBase.data() + 2, signUpLineOptBase.data() + 1 );
+
+          std::ostringstream sstm_subtest;
+          sstm_subtest << sstm_test.str() << " width=" << width << " startX=" << startX << " endX=" << endX
+                       << " endY=" << endY;
+
+          passed = compare_values_1d( sstm_subtest.str(), countRefBase.data(), countOptBase.data(),
+                                       NUM_SAO_EO_CLASSES ) && passed;
+          passed = compare_values_1d( sstm_subtest.str(), diffRefBase.data(), diffOptBase.data(),
+                                       NUM_SAO_EO_CLASSES ) && passed;
+        }
+      }
+    }
+  }
+  return passed;
+}
+
 static bool test_SampleAdaptiveOffset()
 {
   SampleAdaptiveOffset ref{ false };
@@ -7639,7 +7808,23 @@ static bool test_SampleAdaptiveOffset()
     // samples in the four lowest bands: long runs of the same band
     InputGenerator<Pel> low_gen{ bd - 3, /*is_signed=*/false };
     passed = check_SAOcalcSaoStatisticsBo( &ref, &opt, bd, low_gen, rand_gen ) && passed;
-    passed = check_SAOcalcSaoStatisticsEo( &ref, &opt, bd ) && passed;
+
+    passed = check_SAOcalcSaoStatisticsEo0( &ref, &opt, bd, max_gen, min_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo0( &ref, &opt, bd, min_gen, max_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo0( &ref, &opt, bd, rand_gen, rand_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo0( &ref, &opt, bd, rand_gen, rand_gen, /*orgStrideExtra=*/4 ) && passed;
+
+    passed = check_SAOcalcSaoStatisticsEo90( &ref, &opt, bd, max_gen, min_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo90( &ref, &opt, bd, min_gen, max_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo90( &ref, &opt, bd, rand_gen, rand_gen ) && passed;
+
+    passed = check_SAOcalcSaoStatisticsEo135( &ref, &opt, bd, max_gen, min_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo135( &ref, &opt, bd, min_gen, max_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo135( &ref, &opt, bd, rand_gen, rand_gen ) && passed;
+
+    passed = check_SAOcalcSaoStatisticsEo45( &ref, &opt, bd, max_gen, min_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo45( &ref, &opt, bd, min_gen, max_gen ) && passed;
+    passed = check_SAOcalcSaoStatisticsEo45( &ref, &opt, bd, rand_gen, rand_gen ) && passed;
   }
 
   SaoOffsetBlockAccess refApply{ false };
