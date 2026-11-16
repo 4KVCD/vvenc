@@ -167,54 +167,31 @@ static inline int32x4x2_t filter_vert_8x1_N4_neon( int16x8_t const vsrc[4], int1
   return vsum;
 }
 
-static inline int32x4x4_t filter_vert_16x1_N4_neon( int16x8x2_t const vsrc[4], int16x4_t cv, int32x4_t voffset2 )
+// The horizontal stage of the 6-tap 4x4 filter for 4 outputs, tap by tap: offset + sum of ch[t] * src[x + t] over the
+// six non-zero taps t = 1 .. 6 (taps 0 and 7 of the 6-tap table are zero), shifted and narrowed to 16 bits.
+static inline int16x4_t filter_horiz_4x1_N6_neon( Pel const* src, int16x8_t ch, int32x4_t voffset1, int32x4_t invshift1st )
 {
-  int32x4x4_t vsum;
-  vsum.val[0] = vmlal_lane_s16( voffset2, vget_low_s16( vsrc[0].val[0] ), cv, 0 );
-  vsum.val[1] = vmlal_lane_s16( voffset2, vget_high_s16( vsrc[0].val[0] ), cv, 0 );
-  vsum.val[2] = vmlal_lane_s16( voffset2, vget_low_s16( vsrc[0].val[1] ), cv, 0 );
-  vsum.val[3] = vmlal_lane_s16( voffset2, vget_high_s16( vsrc[0].val[1] ), cv, 0 );
-  vsum.val[0] = vmlal_lane_s16( vsum.val[0], vget_low_s16( vsrc[1].val[0] ), cv, 1 );
-  vsum.val[1] = vmlal_lane_s16( vsum.val[1], vget_high_s16( vsrc[1].val[0] ), cv, 1 );
-  vsum.val[2] = vmlal_lane_s16( vsum.val[2], vget_low_s16( vsrc[1].val[1] ), cv, 1 );
-  vsum.val[3] = vmlal_lane_s16( vsum.val[3], vget_high_s16( vsrc[1].val[1] ), cv, 1 );
-  vsum.val[0] = vmlal_lane_s16( vsum.val[0], vget_low_s16( vsrc[2].val[0] ), cv, 2 );
-  vsum.val[1] = vmlal_lane_s16( vsum.val[1], vget_high_s16( vsrc[2].val[0] ), cv, 2 );
-  vsum.val[2] = vmlal_lane_s16( vsum.val[2], vget_low_s16( vsrc[2].val[1] ), cv, 2 );
-  vsum.val[3] = vmlal_lane_s16( vsum.val[3], vget_high_s16( vsrc[2].val[1] ), cv, 2 );
-  vsum.val[0] = vmlal_lane_s16( vsum.val[0], vget_low_s16( vsrc[3].val[0] ), cv, 3 );
-  vsum.val[1] = vmlal_lane_s16( vsum.val[1], vget_high_s16( vsrc[3].val[0] ), cv, 3 );
-  vsum.val[2] = vmlal_lane_s16( vsum.val[2], vget_low_s16( vsrc[3].val[1] ), cv, 3 );
-  vsum.val[3] = vmlal_lane_s16( vsum.val[3], vget_high_s16( vsrc[3].val[1] ), cv, 3 );
-  return vsum;
-}
+  const int16x4_t vsrc1 = vld1_s16( src + 1 );
+  const int16x4_t vsrc2 = vld1_s16( src + 2 );
+  const int16x4_t vsrc3 = vld1_s16( src + 3 );
+  const int16x4_t vsrc4 = vld1_s16( src + 4 );
+  const int16x4_t vsrc5 = vld1_s16( src + 5 );
+  const int16x4_t vsrc6 = vld1_s16( src + 6 );
 
-static inline int16x4_t filter_horiz_4x1_N8_neon( Pel const* src, int16x8_t ch, int32x4_t voffset1, int32x4_t invshift1st )
-{
-  int16x8_t vsrca0 = vld1q_s16( src + 0 );
-  int16x8_t vsrca1 = vld1q_s16( src + 1 );
-  int16x8_t vsrca2 = vld1q_s16( src + 2 );
-  int16x8_t vsrca3 = vld1q_s16( src + 3 );
+  int32x4_t vsum = vmlal_lane_s16( voffset1, vsrc1, vget_low_s16( ch ), 1 );
+  vsum           = vmlal_lane_s16( vsum, vsrc2, vget_low_s16( ch ), 2 );
+  vsum           = vmlal_lane_s16( vsum, vsrc3, vget_low_s16( ch ), 3 );
+  vsum           = vmlal_lane_s16( vsum, vsrc4, vget_high_s16( ch ), 0 );
+  vsum           = vmlal_lane_s16( vsum, vsrc5, vget_high_s16( ch ), 1 );
+  vsum           = vmlal_lane_s16( vsum, vsrc6, vget_high_s16( ch ), 2 );
 
-  int32x4_t a0 = vmull_s16( vget_low_s16( vsrca0 ), vget_low_s16( ch ) );
-  int32x4_t a1 = vmull_s16( vget_low_s16( vsrca1 ), vget_low_s16( ch ) );
-  int32x4_t a2 = vmull_s16( vget_low_s16( vsrca2 ), vget_low_s16( ch ) );
-  int32x4_t a3 = vmull_s16( vget_low_s16( vsrca3 ), vget_low_s16( ch ) );
-
-  a0 = vmlal_s16( a0, vget_high_s16( vsrca0 ), vget_high_s16( ch ) );
-  a1 = vmlal_s16( a1, vget_high_s16( vsrca1 ), vget_high_s16( ch ) );
-  a2 = vmlal_s16( a2, vget_high_s16( vsrca2 ), vget_high_s16( ch ) );
-  a3 = vmlal_s16( a3, vget_high_s16( vsrca3 ), vget_high_s16( ch ) );
-
-  int32x4_t vsuma = horizontal_add_4d_s32x4( a0, a1, a2, a3 );
-  vsuma           = vaddq_s32( vsuma, voffset1 );
-  vsuma           = vshlq_s32( vsuma, invshift1st );
-  return vqmovn_s32( vsuma );
+  vsum = vshlq_s32( vsum, invshift1st );
+  return vqmovn_s32( vsum );
 }
 
 template<bool isLast>
-static ALWAYS_INLINE void simdFilter4x4_N6_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride, int width,
-                                                 int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
+static ALWAYS_INLINE void simdFilter4x4_N6_body_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride,
+                                                      int width, int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
 {
   CHECKD( width != 4, "Width must be 4" );
   CHECKD( height != 4, "Height must be 4" );
@@ -247,23 +224,23 @@ static ALWAYS_INLINE void simdFilter4x4_N6_neon( const ClpRng& clpRng, Pel const
   int32x4_t invshift2nd = vdupq_n_s32( -shift2nd );
 
   int16x4_t vsrcv[9];
-  vsrcv[0] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[0] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[1] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[1] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[2] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[2] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[3] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[3] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[4] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[4] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[5] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[5] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[6] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[6] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[7] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[7] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
   src += srcStride;
-  vsrcv[8] = filter_horiz_4x1_N8_neon( src, ch, voffset1, invshift1st );
+  vsrcv[8] = filter_horiz_4x1_N6_neon( src, ch, voffset1, invshift1st );
 
   int h = 0;
   do
@@ -285,6 +262,35 @@ static ALWAYS_INLINE void simdFilter4x4_N6_neon( const ClpRng& clpRng, Pel const
 
     dst += dstStride;
   } while( ++h != 4 );
+}
+
+// The final-output (isLast) filter out of line: inlined into a loop over sub-blocks such as affineLumaCU_neon<false>'s,
+// clang spills its row vectors. The intermediate-output filter stays inline.
+#if defined( _MSC_VER )
+#define FILTER4X4_NOINLINE __declspec( noinline )
+#else
+#define FILTER4X4_NOINLINE __attribute__( ( noinline ) )
+#endif
+static inline FILTER4X4_NOINLINE void simdFilter4x4_N6_last_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst,
+                                                                  int dstStride, int width, int height, TFilterCoeff const* coeffH,
+                                                                  TFilterCoeff const* coeffV )
+{
+  simdFilter4x4_N6_body_neon<true>( clpRng, src, srcStride, dst, dstStride, width, height, coeffH, coeffV );
+}
+#undef FILTER4X4_NOINLINE
+
+template<bool isLast>
+static ALWAYS_INLINE void simdFilter4x4_N6_neon( const ClpRng& clpRng, Pel const* src, int srcStride, Pel* dst, int dstStride, int width,
+                                                 int height, TFilterCoeff const* coeffH, TFilterCoeff const* coeffV )
+{
+  if( isLast )
+  {
+    simdFilter4x4_N6_last_neon( clpRng, src, srcStride, dst, dstStride, width, height, coeffH, coeffV );
+  }
+  else
+  {
+    simdFilter4x4_N6_body_neon<false>( clpRng, src, srcStride, dst, dstStride, width, height, coeffH, coeffV );
+  }
 }
 
 } // namespace vvenc
