@@ -51,6 +51,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "CommonLib/CommonDef.h"
 #include "CommonLib/RdCost.h"
 #include "RdCost_neon.h"
+#include "mem_neon.h"
 #include "permute_neon.h"
 #include "reverse_neon.h"
 #include "sum_neon.h"
@@ -1430,19 +1431,6 @@ template<int iWidth>
 Distortion xGetSAD_NxN_neon( const DistParam& rcDtParam )
 {
   return xGetSAD_generic_neon( rcDtParam, iWidth );
-}
-
-// Four rows of two samples as one vector: row k in lanes 2 k and 2 k + 1. Each row is read as one 32-bit lane (the
-// casts are deliberate: two samples per lane); rows 0 and 1, and rows 2 and 3, are loaded separately.
-static inline int16x8_t load_s16x2x4( const Pel* src, const ptrdiff_t stride )
-{
-  const uint32_t* row0 = reinterpret_cast<const uint32_t*>( src );
-  const uint32_t* row1 = reinterpret_cast<const uint32_t*>( src + stride );
-  const uint32_t* row2 = reinterpret_cast<const uint32_t*>( src + 2 * stride );
-  const uint32_t* row3 = reinterpret_cast<const uint32_t*>( src + 3 * stride );
-  const uint32x2_t rows01 = vld1_lane_u32( row1, vld1_dup_u32( row0 ), 1 );
-  const uint32x2_t rows23 = vld1_lane_u32( row3, vld1_dup_u32( row2 ), 1 );
-  return vreinterpretq_s16_u32( vcombine_u32( rows01, rows23 ) );
 }
 
 // DF_SSE2 with the arithmetic of xGetSSE_NxN_SIMD<2> at SSE4.1 (what Arm builds ran through SIMDe): four rows per

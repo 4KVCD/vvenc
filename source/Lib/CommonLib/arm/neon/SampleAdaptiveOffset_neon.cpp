@@ -561,8 +561,9 @@ static inline void saoEoRun_neon( const Pel* src, Pel* res, const ptrdiff_t aOff
   auto step = [&]( const int x )
   {
     const int16x8_t c   = vld1q_s16( src + x );
-    const int16x8_t sum = vaddq_s16( sign_s16( c, vld1q_s16( src + x + aOff ) ),
-                                     sign_s16( c, vld1q_s16( src + x + bOff ) ) );
+    const int16x8_t a   = vld1q_s16( src + x + aOff );
+    const int16x8_t b   = vld1q_s16( src + x + bOff );
+    const int16x8_t sum = vaddq_s16( sign_s16( c, a ), sign_s16( c, b ) );
     const uint16x8_t idx = vreinterpretq_u16_s16( vaddq_s16( sum, vdupq_n_s16( 2 ) ) );
     vst1q_s16( res + x, saoApply_neon( c, saoOffsets_neon( table, idx ), vMax ) );
   };

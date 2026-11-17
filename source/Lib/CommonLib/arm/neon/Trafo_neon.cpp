@@ -75,20 +75,24 @@ static inline int64_t shift_and_round( int64_t x, int shift )
 
 // The forward matrix multiply of a single line (TCoeffOps::fastFwdCore_1D: the 1-D transforms of 1xN and Nx1 blocks),
 // 4 outputs at a time. The inputs are residuals, so narrowing them to 16 bits is exact (as fastFwdCore_neon), and
-// vrshlq_s32 by -shift is C's ( sum + ( 1 << ( shift - 1 ) ) ) >> shift for shift >= 1.
+// vrshlq_s32 by -shift is C's ( sum + ( 1 << ( shift - 1 ) ) ) >> shift for shift >= 1. Sizes 8 to 64 take 8 inputs
+// and 8 entries of each matrix row per step.
 template<unsigned trSize>
 static void fastFwd1D_neon( const TMatrixCoeff* tc, const TCoeff* src, TCoeff* dst, unsigned line, unsigned reducedLine,
                             unsigned cutoff, int shift )
 {
-  static_assert( trSize % 4 == 0, "trSize should be a multiple of four" );
+  static_assert( trSize % 8 == 0, "trSize should be a multiple of eight (size 4 is specialized below)" );
   CHECKD( line != 1 || reducedLine != 1, "the 1-D transform has a single line" );
   CHECKD( shift < 1, "shift must be at least one" );
 
-  int16x4_t s[trSize / 4];
-  for( unsigned k = 0; k < trSize / 4; k++ )
+  int16x8_t s[trSize / 8];
+  for( unsigned k = 0; k < trSize / 8; k++ )
   {
-    const int32x4_t v = vld1q_s32( src + 4 * k );
-    s[k]              = vmovn_s32( v );
+    const int32x4_t lo = vld1q_s32( src + 8 * k );
+    const int32x4_t hi = vld1q_s32( src + 8 * k + 4 );
+    // the low 16 bits of each 32-bit lane, as vmovn_s32 of both, but in one 128-bit register (uzp1 on AArch64), which
+    // lets the high-half products below take smlal2
+    s[k] = vuzpq_s16( vreinterpretq_s16_s32( lo ), vreinterpretq_s16_s32( hi ) ).val[0];
   }
   const int32x4_t vshift = vdupq_n_s32( -shift );
 
@@ -104,16 +108,20 @@ static void fastFwd1D_neon( const TMatrixCoeff* tc, const TCoeff* src, TCoeff* d
     int32x4_t sum1 = vdupq_n_s32( 0 );
     int32x4_t sum2 = vdupq_n_s32( 0 );
     int32x4_t sum3 = vdupq_n_s32( 0 );
-    for( unsigned k = 0; k < trSize / 4; k++ )
+    for( unsigned k = 0; k < trSize / 8; k++ )
     {
-      const int16x4_t c0 = vld1_s16( row0 + 4 * k );
-      const int16x4_t c1 = vld1_s16( row1 + 4 * k );
-      const int16x4_t c2 = vld1_s16( row2 + 4 * k );
-      const int16x4_t c3 = vld1_s16( row3 + 4 * k );
-      sum0 = vmlal_s16( sum0, s[k], c0 );
-      sum1 = vmlal_s16( sum1, s[k], c1 );
-      sum2 = vmlal_s16( sum2, s[k], c2 );
-      sum3 = vmlal_s16( sum3, s[k], c3 );
+      const int16x8_t c0 = vld1q_s16( row0 + 8 * k );
+      const int16x8_t c1 = vld1q_s16( row1 + 8 * k );
+      const int16x8_t c2 = vld1q_s16( row2 + 8 * k );
+      const int16x8_t c3 = vld1q_s16( row3 + 8 * k );
+      sum0 = vmlal_s16( sum0, vget_low_s16( s[k] ), vget_low_s16( c0 ) );
+      sum1 = vmlal_s16( sum1, vget_low_s16( s[k] ), vget_low_s16( c1 ) );
+      sum2 = vmlal_s16( sum2, vget_low_s16( s[k] ), vget_low_s16( c2 ) );
+      sum3 = vmlal_s16( sum3, vget_low_s16( s[k] ), vget_low_s16( c3 ) );
+      sum0 = vmlal_s16( sum0, vget_high_s16( s[k] ), vget_high_s16( c0 ) );
+      sum1 = vmlal_s16( sum1, vget_high_s16( s[k] ), vget_high_s16( c1 ) );
+      sum2 = vmlal_s16( sum2, vget_high_s16( s[k] ), vget_high_s16( c2 ) );
+      sum3 = vmlal_s16( sum3, vget_high_s16( s[k] ), vget_high_s16( c3 ) );
     }
     vst1q_s32( dst + j, vrshlq_s32( horizontal_add_4d_s32x4( sum0, sum1, sum2, sum3 ), vshift ) );
   }
@@ -124,12 +132,45 @@ static void fastFwd1D_neon( const TMatrixCoeff* tc, const TCoeff* src, TCoeff* d
     const TMatrixCoeff* row = tc + j * trSize;
 
     int32x4_t sum = vdupq_n_s32( 0 );
-    for( unsigned k = 0; k < trSize / 4; k++ )
+    for( unsigned k = 0; k < trSize / 8; k++ )
     {
-      const int16x4_t c = vld1_s16( row + 4 * k );
-      sum = vmlal_s16( sum, s[k], c );
+      const int16x8_t c = vld1q_s16( row + 8 * k );
+      sum = vmlal_s16( sum, vget_low_s16( s[k] ), vget_low_s16( c ) );
+      sum = vmlal_s16( sum, vget_high_s16( s[k] ), vget_high_s16( c ) );
     }
     dst[j] = (TCoeff) shift_and_round( horizontal_add_s32x4( sum ), shift );
+  }
+}
+
+// Size 4: the matrix rows are 4 entries long and contiguous, so one load takes two of them.
+template<>
+void fastFwd1D_neon<4>( const TMatrixCoeff* tc, const TCoeff* src, TCoeff* dst, unsigned line, unsigned reducedLine,
+                        unsigned cutoff, int shift )
+{
+  CHECKD( line != 1 || reducedLine != 1, "the 1-D transform has a single line" );
+  CHECKD( shift < 1, "shift must be at least one" );
+
+  const int32x4_t v      = vld1q_s32( src );
+  const int16x4_t s      = vmovn_s32( v );
+  const int32x4_t vshift = vdupq_n_s32( -shift );
+
+  unsigned j = 0;
+  for( ; j + 4 <= cutoff; j += 4 )
+  {
+    const int16x8_t c01  = vld1q_s16( tc + 4 * j );
+    const int16x8_t c23  = vld1q_s16( tc + 4 * j + 8 );
+    const int32x4_t sum0 = vmull_s16( s, vget_low_s16( c01 ) );
+    const int32x4_t sum1 = vmull_s16( s, vget_high_s16( c01 ) );
+    const int32x4_t sum2 = vmull_s16( s, vget_low_s16( c23 ) );
+    const int32x4_t sum3 = vmull_s16( s, vget_high_s16( c23 ) );
+    vst1q_s32( dst + j, vrshlq_s32( horizontal_add_4d_s32x4( sum0, sum1, sum2, sum3 ), vshift ) );
+  }
+
+  // the encoder's cut-offs are multiples of 4; any remainder one output at a time
+  for( ; j < cutoff; j++ )
+  {
+    const int16x4_t c = vld1_s16( tc + 4 * j );
+    dst[j] = (TCoeff) shift_and_round( horizontal_add_s32x4( vmull_s16( s, c ) ), shift );
   }
 }
 
