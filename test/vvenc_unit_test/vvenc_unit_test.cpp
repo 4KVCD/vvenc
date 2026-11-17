@@ -6252,10 +6252,8 @@ static bool check_filterBlkCcAlf( AdaptiveLoopFilter* ref, AdaptiveLoopFilter* o
   // The coefficients of the bitstream: 0 and +-2^k up to 64; the eighth is padding, 0 as in the encoder's arrays.
   static const std::vector<int16_t> coeffValues{ 0, 1, 2, 4, 8, 16, 32, 64, -1, -2, -4, -8, -16, -32, -64 };
 
-  // 4:2:2 is left out: the x86 kernels filter it with the 4:2:0 path, which does not skip the two luma rows at the
-  // virtual boundary that the C code skips when chroma has full height, so they differ from C there.
   DimensionGenerator rng;
-  for( ChromaFormat chromaFormat : { CHROMA_420, CHROMA_444 } )
+  for( ChromaFormat chromaFormat : { CHROMA_420, CHROMA_422, CHROMA_444 } )
   {
     sps->chromaFormatIdc = chromaFormat;
     for( int bitDepth : { 8, 10 } )

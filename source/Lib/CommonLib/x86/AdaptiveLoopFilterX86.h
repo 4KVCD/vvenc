@@ -1176,6 +1176,10 @@ void simdFilterBlkCcAlf( const PelBuf &dstBuf, const CPelUnitBuf &recSrc, const 
           const Pel *srcCross = lumaPtr + col + row * lumaStride;
 
           int pos = ( ( startHeight + i + ii ) << scaleY ) & ( vbCTUHeight - 1 );
+          if( scaleY == 0 && ( pos == vbPos || pos == vbPos + 1 ) )
+          {
+            continue;
+          }
           if( pos == ( vbPos - 2 ) || pos == ( vbPos + 1 ) )
           {
             offset3 = offset1;
@@ -1350,6 +1354,10 @@ void simdFilterBlkCcAlf<AVX2>( const PelBuf &dstBuf, const CPelUnitBuf &recSrc, 
           const Pel *srcCross = lumaPtr + col + row * lumaStride;
 
           int pos = ( ( startHeight + i + ii ) << scaleY ) & ( vbCTUHeight - 1 );
+          if( scaleY == 0 && ( pos == vbPos || pos == vbPos + 1 ) )
+          {
+            continue;
+          }
           if( pos == ( vbPos - 2 ) || pos == ( vbPos + 1 ) )
           {
             offset3 = offset1;
