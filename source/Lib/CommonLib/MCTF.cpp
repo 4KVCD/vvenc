@@ -695,12 +695,12 @@ void MCTF::init( const VVEncCfg& encCfg, bool isFinalPass, NoMallocThreadPool* t
 
   // The filter strength per MCTF index, from the GOP's key pictures (the last index, the pictures most others predict
   // from) down the temporal levels: the configured strength, raised for the three upper levels with MCTFLevelTilt. A
-  // cleaner reference pays most where more pictures predict from it. Random access only: with GOP size 1 (all intra)
-  // every picture has MCTF index 0 and none is predicted from another, and in low delay (no picture reordering) the
-  // raise costs bits (measured +0.8 to +0.9 % BD-rate on a grainy and a clean clip). BIM keeps the configured strength,
-  // the film grain analysis its own fixed strength.
+  // cleaner reference pays most where more pictures predict from it. The configuration allows it in random access only
+  // (checkCfgParameter): with GOP size 1 (all intra) every picture has MCTF index 0 and none is predicted from another,
+  // and in low delay (no picture reordering) the raise costs bits (measured +0.8 to +0.9 % BD-rate on a grainy and a
+  // clean clip). BIM keeps the configured strength, the film grain analysis its own fixed strength.
   static constexpr double LEVEL_RAISE[ 4 ] = { 0.6, 0.46, 0.21, 0.0 };   // from the key pictures down
-  const bool levelTilt = m_encCfg->m_vvencMCTF.MCTFLevelTilt && m_encCfg->m_GOPSize > 1 && m_encCfg->m_picReordering;
+  const bool levelTilt = m_encCfg->m_vvencMCTF.MCTFLevelTilt > 0;
   const int  numFrames = m_encCfg->m_vvencMCTF.numFrames;
   for( int i = 0; i < numFrames; i++ )
   {

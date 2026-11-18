@@ -573,6 +573,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
   IStreamToEnum<int>                toAud                        ( &c->m_AccessUnitDelimiter,         &FlagToIntMap<int> );
   IStreamToEnum<int>                toVui                        ( &c->m_vuiParametersPresent,        &FlagToIntMap<int> );
   IStreamToEnum<int8_t>             toGOPQPA                     ( &c->m_GOPQPA,                      &FlagToIntMap<int8_t> );
+  IStreamToEnum<int>                toMCTFLevelTilt              ( &c->m_vvencMCTF.MCTFLevelTilt,     &FlagToIntMap<int> );
   IStreamToEnum<bool>               toQPA                        ( &c->m_usePerceptQPA,               &QPAToIntMap );
   
 
@@ -1167,7 +1168,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
     ("AllowDisFracMMVD",                                c->m_allowDisFracMMVD,                               "Disable fractional MVD in MMVD mode adaptively")
     ("MCTF",                                            c->m_vvencMCTF.MCTF,                                 "Enable GOP based temporal filter. (0:off, 1:filter all frames, 2:use SCC detection to disable for screen coded content)")
     ("MCTFSpeed",                                       c->m_vvencMCTF.MCTFSpeed,                            "MCTF Fast Mode (0:best quality ... 4:fastest operation)")
-    ("MCTFLevelTilt",                                   c->m_vvencMCTF.MCTFLevelTilt,                        "MCTF filter strength raised for the three upper temporal levels, the pictures the others predict from (0: off, 1: on; random access only; also raises explicit MCTFStrength values)")
+    ("MCTFLevelTilt",                                   toMCTFLevelTilt,                                     "MCTF filter strength raised for the three upper temporal levels, the pictures the others predict from (-1: auto, on with film grain analysis (fga) in random access; 0: off; 1: on, random access only; also raises explicit MCTFStrength values)")
     ("MCTFUnitSize",                                    c->m_vvencMCTF.MCTFUnitSize,                         "Size of MCTF operation area (block size for motion compensation).")
     ("MCTFKeepDetail",                                  toMCTFKeepDetail,                                    "(experimental) Keep the fine band of noisy sources on filtered pictures (0:off, 1:on, 2:below QP 16, with two rate-control passes decided by the second, off with one); larger files")
     ("MCTFFutureReference",                             c->m_vvencMCTF.MCTFFutureReference,                  "Enable referencing of future frames in the GOP based temporal filter. This is typically disabled for Low Delay configurations.")

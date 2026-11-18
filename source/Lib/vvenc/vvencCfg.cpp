@@ -338,7 +338,7 @@ VVENC_DECL void vvenc_vvencMCTF_default(vvencMCTF *vvencMCTF )
   vvencMCTF->numFrames = 0;
   vvencMCTF->numStrength = 0;
   vvencMCTF->MCTFUnitSize = -1;
-  vvencMCTF->MCTFLevelTilt = 1;
+  vvencMCTF->MCTFLevelTilt = -1;
   memset( vvencMCTF->MCTFFrames, 0, sizeof( vvencMCTF->MCTFFrames ) );
   memset( vvencMCTF->MCTFStrengths, 0, sizeof( vvencMCTF->MCTFStrengths ) );
 }
@@ -1652,6 +1652,11 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
   {
     c->m_GOPQPA = c->m_usePerceptQPA ? 0 : 1;
   }
+  if ( c->m_vvencMCTF.MCTFLevelTilt < 0 )
+  {
+    // auto: on with the film grain analysis, whose synthesized grain makes up for the stronger filtering; random access only
+    c->m_vvencMCTF.MCTFLevelTilt = c->m_fga && c->m_GOPSize > 1 && c->m_picReordering ? 1 : 0;
+  }
 
   vvenc_confirmParameter(c, c->m_maxDeltaQP < -2 || c->m_maxDeltaQP > vvenc::MAX_QP, "MaxDeltaQP must be in range of -2 - 63" );
   if( c->m_usePerceptQPA || c->m_blockImportanceMapping || c->m_lumaLevelToDeltaQPEnabled == 1 )
@@ -2115,7 +2120,9 @@ static bool checkCfgParameter( vvenc_config *c )
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTF > 2 || c->m_vvencMCTF.MCTF < 0,                    "MCTF out of range" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.numFrames != c->m_vvencMCTF.numStrength,                "MCTF parameter list sizes differ" );
   vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFSpeed < 0 || c->m_vvencMCTF.MCTFSpeed > 4,          "MCTFSpeed exceeds supported range (0..4)" );
-  vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFLevelTilt < 0 || c->m_vvencMCTF.MCTFLevelTilt > 1,  "MCTFLevelTilt must be 0 (off) or 1 (on)" );
+  vvenc_confirmParameter( c, c->m_vvencMCTF.MCTFLevelTilt < 0 || c->m_vvencMCTF.MCTFLevelTilt > 1,  "MCTFLevelTilt must be -1 (auto), 0 (off) or 1 (on)" );
+  vvenc_confirmParameter( c, c->m_vvencMCTF.MCTF && c->m_vvencMCTF.MCTFLevelTilt > 0 && ( c->m_GOPSize == 1 || !c->m_picReordering ),
+                                                                                                    "MCTFLevelTilt requires random access (GOPSize > 1 and PicReordering)" );
   vvenc_confirmParameter( c, c->m_mctfKeepDetail < 0 || c->m_mctfKeepDetail > 2, "MCTFKeepDetail must be 0, 1 or 2" );
   vvenc_confirmParameter( c, c->m_MTSImplicit < 0 || c->m_MTSImplicit > 2, "MTSImplicit must be 0, 1 or 2" );
   vvenc_confirmParameter( c, c->m_veryLowQPSpeedUp < 0 || c->m_veryLowQPSpeedUp > 2, "VeryLowQPSpeedUp must be 0, 1 or 2" );
@@ -3485,7 +3492,7 @@ VVENC_DECL const char* vvenc_get_config_as_string( vvenc_config *c, vvencMsgLeve
     css << "MinSearchWindow:" << c->m_minSearchWindow << " ";
     css << "EDO:" << c->m_EDO << " ";
     css << "MCTF:" << c->m_vvencMCTF.MCTF << " ";
-    if( c->m_vvencMCTF.MCTF && c->m_vvencMCTF.MCTFLevelTilt && c->m_GOPSize > 1 && c->m_picReordering ) css << "(level tilt) ";
+    if( c->m_vvencMCTF.MCTF && c->m_vvencMCTF.MCTFLevelTilt > 0 ) css << "(level tilt) ";
     css << "BIM:" << (int)c->m_blockImportanceMapping << " ";
     if( c->m_blockImportanceMapping == 1 )
     {
