@@ -1919,6 +1919,7 @@ void IntraSearch::xIntraCodingLumaQT(CodingStructure& cs, Partitioner& partition
         cuCtx.lfnstLastScanPos               = false;
         cuCtx.violatesLfnstConstrained[CH_L] = false;
         cuCtx.violatesLfnstConstrained[CH_C] = false;
+        cuCtx.violatesMtsCoeffConstraint     = false;
 
         if ((lfnstIdx != startLfnstIdx) || (modeId))
         {
