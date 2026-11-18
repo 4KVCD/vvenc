@@ -1119,7 +1119,7 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
       if( isFilterThisFrame && pic->useMCTF && filterStrength == FGA_FILTER_STRENGTH )
       {
         // the picture filtered for the encoding is exactly the one the analysis needs (from QP 20 on with MCTFLevelTilt
-        // off; the tilt raises the key pictures' strength, so the analysis filters its own copy)
+        // off; the tilt raises the upper temporal levels' strength, so for those the analysis filters its own copy)
         pic->m_picShared->fgaUsesFilteredBuf() = true;
       }
       else
