@@ -289,22 +289,20 @@ namespace DQIntern
     int64_t           m_DistStepAdd;
     int64_t           m_DistOrgFact;
     // psy-rdoq (I-slice luma, see Quantizer::usesPsyRdoq): the block's distortion credit per qIdx unit (0: off)
-    int64_t           m_psyBonus;
+    int64_t           m_psyBonus = 0;
   };
 
   // The memo of Quantizer::initQuantBlock with no gValue. With the transform skip path excluded, the result depends
-  // only on the channel type, the block size, QP, lambda and psy-rdoq's strength, and on values fixed for the sequence,
-  // and those rarely change from one block of a size to the next. Log2( width ) + Log2( height ) is enough for the size:
-  // it gives the transform shift and whether the sqrt(2) adjustment applies.
+  // only on the channel type, the block size, QP, lambda and the psy-rdoq strength acting on the block, and on values
+  // fixed for the sequence, and those five rarely change from one block of a size to the next. Log2( width ) +
+  // Log2( height ) is enough for the size: it gives the transform shift and whether the sqrt(2) adjustment applies.
   struct QuantBlockMemo
   {
     struct Entry
     {
       double           lambda = 0;
+      double           psyRdoqStrength = 0;   // 0 where psy-rdoq does not act on the block
       int              qpDQ   = std::numeric_limits<int>::min();
-      // psy-rdoq's strength when it applies to the block, else 0: its credit and threshold are in params, and the
-      // strength changes per picture (EncSlice::getPsyRdoqStrength), so it is part of the key
-      double           psyStrength = 0;
       QuantBlockParams params;
     };
     Entry entry[ MAX_NUM_CH ][ 2 * 6 + 1 ];
@@ -354,7 +352,8 @@ namespace DQIntern
     int64_t psyCredit      ( int64_t qIdx, int64_t org16 ) const { return ( m_psyBonus * std::min<int64_t>( qIdx << 4, org16 ) ) >> 4; }
 
     int               m_DqThrVal;
-    double            m_psyRdoqStrength = 0.0;   // psy-rdoq's strength (0: off)
+    // psy-rdoq's strength (0: off); where it acts, see usesPsyRdoq
+    double            m_psyRdoqStrength = 0.0;
   };
 
 #define RICEMAX 32

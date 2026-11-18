@@ -400,20 +400,32 @@ void EncSlice::xInitSliceLambdaQP( Slice* slice )
     dQP = std::max<double> (-slice->sps->qpBDOffset[CH_L], dQP + slice->pic->psyRateQpOffset);
   }
 
-  // A fractional QP gives a fractional picture QP. With QPA, its integer part sets the slice QP and lambda as for an
-  // integer QP, and its fraction raises the CTUs whose activity-based QP lies closest to the next integer, see
-  // BitAllocation::applyQPAdaptationSlice. Without QPA, every picture keeps the fraction, as in HM: the lambda comes from
-  // the fractional QP and the slice QP is that QP rounded (xCalculateLambda). Raising a share of the pictures by one
-  // whole QP instead made fine texture pop in and out from picture to picture where one QP decides whether it is coded
-  // (nocturne_grain, --tune grain: B pictures at slice QP 33 cost 2.2x those at 34), and the rate non-monotone in --qp.
-  if (m_pcEncCfg->m_usePerceptQPA)
+  // A fractional QP gives a fractional picture QP. Its integer part sets the slice QP and lambda as for an integer QP,
+  // and its fraction raises some blocks or pictures by one QP: with QPA, the CTUs whose activity-based QP lies closest
+  // to the next integer, see BitAllocation::applyQPAdaptationSlice; without QPA, a share of the pictures equal to the
+  // fraction. Each block keeps the lambda of its integer QP, so the RD trade-off stays consistent.
+  // With psy-rd and without QPA, every picture keeps the fraction instead, as in HM: the lambda comes from the fractional
+  // QP and the slice QP is that QP rounded (xCalculateLambda). Under psy-rd, raising a share of the pictures by one whole
+  // QP made fine texture pop in and out from picture to picture where one QP decides whether it is coded (nocturne_grain,
+  // --tune grain: B pictures at slice QP 33 cost 2.2x those at 34), and the rate non-monotone in --qp.
+  const bool keepFraction = !m_pcEncCfg->m_usePerceptQPA && m_pcEncCfg->m_psyRdStrengthVal > 0;
+  if (keepFraction)
   {
-    slice->pic->picQPFraction = dQP - floor (dQP);
-    dQP -= slice->pic->picQPFraction;
+    slice->pic->picQPFraction = 0.0;
   }
   else
   {
-    slice->pic->picQPFraction = 0.0;
+    slice->pic->picQPFraction = dQP - floor (dQP);
+    dQP -= slice->pic->picQPFraction;
+    if (!m_pcEncCfg->m_usePerceptQPA)
+    {
+      // The thresholds come from the low-discrepancy sequence frac(POC * (sqrt(2) - 1)), whose values stay evenly
+      // spread also for the power-of-two POC spacing of one temporal layer, so every layer gets its share of raised QPs.
+      const double ditherPos = slice->poc * 0.41421356237309515;
+
+      if (slice->pic->picQPFraction > ditherPos - floor (ditherPos)) dQP += 1.0;
+      slice->pic->picQPFraction = 0.0;
+    }
   }
 
   double dLambda = (rcp ? slice->pic->picInitialLambda : xCalculateLambda (slice, slice->TLayer, dQP, dQP, iQP));

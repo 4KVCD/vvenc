@@ -826,18 +826,20 @@ namespace DQIntern
     const int       qpDQ = cQP.Qp( false ) + 1;
     const CompArea& area = tu.blocks[compID];
     QuantBlockMemo::Entry& kept = memo.entry[toChannelType( compID )][Log2( area.width ) + Log2( area.height )];
-    const double psyStrength = usesPsyRdoq( tu, compID ) ? m_psyRdoqStrength : 0.0;
-    if( kept.qpDQ == qpDQ && kept.lambda == lambda && kept.psyStrength == psyStrength )
+    // psy-rdoq changes the parameters where it acts (I-slice luma), and its strength changes from picture to picture
+    // and within a block (TrQuant::requantLumaWithoutPsyRdoq)
+    const double psyRdoqStrength = usesPsyRdoq( tu, compID ) ? m_psyRdoqStrength : 0.0;
+    if( kept.qpDQ == qpDQ && kept.lambda == lambda && kept.psyRdoqStrength == psyRdoqStrength )
     {
       static_cast<QuantBlockParams&>( *this ) = kept.params;
       return;
     }
     initQuantBlock( tu, compID, cQP, lambda );
     m_thresDefault = TCoeff( m_thresLast / ( TCoeff( m_QScale ) << 2 ) );
-    kept.qpDQ        = qpDQ;
-    kept.lambda      = lambda;
-    kept.psyStrength = psyStrength;
-    kept.params      = *this;
+    kept.qpDQ      = qpDQ;
+    kept.lambda    = lambda;
+    kept.psyRdoqStrength = psyRdoqStrength;
+    kept.params    = *this;
   }
 
   void dequantCoeffs( const TCoeffSig* qCoeff, TCoeff* tCoeff, const ScanElement* scan, int lastScanIdx, int /*width*/, int /*height*/,
@@ -1227,14 +1229,20 @@ void DepQuant::xQuantDQ( TransformUnit& tu, const CCoeffBuf& srcCoeff, const Com
   
   //===== reset / pre-init =====
   const TUParameters& tuPars  = *m_scansRom->getTUPars( tu.blocks[compID], compID );
-  m_quant.initQuantBlock    ( tu, compID, cQP, lambda, m_quantBlockMemo );
   const bool keepHighBand = m_keepHighBand && isLuma( compID ) && !enableScalingLists && tu.cs->slice->sliceQp <= KEEP_HIGH_BAND_MAX_SLICE_QP;
   DQIntern::Quantizer::DistWeight lowBandWeight{}, highBandWeight{};
   if( keepHighBand )
   {
+    // the block's parameters are those of the high band's lambda (as the memo keeps them), the low band's lambda gives
+    // its distortion weight only
+    m_quant.initQuantBlock( tu, compID, cQP, lambda );
     lowBandWeight = m_quant.getDistWeight();
-    m_quant.initQuantBlock( tu, compID, cQP, lambda * KEEP_HIGH_BAND_LAMBDA );
+    m_quant.initQuantBlock( tu, compID, cQP, lambda * KEEP_HIGH_BAND_LAMBDA, m_quantBlockMemo );
     highBandWeight = m_quant.getDistWeight();
+  }
+  else
+  {
+    m_quant.initQuantBlock  ( tu, compID, cQP, lambda, m_quantBlockMemo );
   }
   TCoeffSig*    qCoeff      = tu.getCoeffs( compID ).buf;
   const TCoeff* tCoeff      = srcCoeff.buf;
