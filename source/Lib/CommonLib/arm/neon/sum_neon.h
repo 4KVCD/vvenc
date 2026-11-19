@@ -102,10 +102,17 @@ static inline uint64x2_t vvenc_vceqq_u64( uint64x2_t a, uint64x2_t b )
 #endif
 }
 
-// true when either lane of the 64-bit compare mask v is set (its low halves, narrowed, as one 64-bit value)
+// true when any bit of v is set, in either 64-bit lane: the pairwise maximum of the four 32-bit words is non-zero
 static inline bool any_lane_set_u64x2( const uint64x2_t v )
 {
-  return vget_lane_u64( vreinterpret_u64_u32( vmovn_u64( v ) ), 0 ) != 0;
+  const uint32x4_t w = vreinterpretq_u32_u64( v );
+#if REAL_TARGET_AARCH64
+  // the low 64 bits of the pairwise maximum hold max( w0, w1 ) and max( w2, w3 )
+  return vgetq_lane_u64( vreinterpretq_u64_u32( vpmaxq_u32( w, w ) ), 0 ) != 0;
+#else
+  const uint32x2_t m = vmax_u32( vget_low_u32( w ), vget_high_u32( w ) );
+  return vget_lane_u32( vpmax_u32( m, m ), 0 ) != 0;
+#endif
 }
 
 static inline int16_t horizontal_add_s16x8( const int16x8_t a )
