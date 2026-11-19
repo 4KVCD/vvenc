@@ -1526,9 +1526,10 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
         } // for loop-iter
       }
 
-      // SMVD
-      if( cs.slice->biDirPred )
+      // SMVD; the DEV nearby-use gate (EncModeCtrl.h) stops its search where no CU nearby uses SMVD
+      if( cs.slice->biDirPred && m_modeCtrl->devToolAllowed( DEV_TOOL_SMVD ) )
       {
+        DevScopedTimer devTimer( *m_modeCtrl, DEV_PART_SMVD );   // DEV search census
         double th1 = 1.02;
         bool testSME = true;
         int numStartCand = m_pcEncCfg->m_SMVD > 1 ? 1 : 5;
@@ -1841,8 +1842,10 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
         checkAffine = false;
       }
     }
-    if (cu.Y().width > 8 && cu.Y().height > 8 && cu.slice->sps->Affine && checkAffine)
+    // the DEV nearby-use gate (EncModeCtrl.h) stops the affine search where no CU nearby is affine
+    if (cu.Y().width > 8 && cu.Y().height > 8 && cu.slice->sps->Affine && checkAffine && m_modeCtrl->devToolAllowed( DEV_TOOL_AFFINE ))
     {
+      DevScopedTimer devTimer( *m_modeCtrl, DEV_PART_AFFINE_ME );   // DEV search census
       PROFILER_SCOPE_AND_STAGE_EXT( 1, _TPROF, P_INTER_MVD_SEARCH_AFFINE, &cs, partitioner.chType );
       m_hevcCost = uiHevcCost;
       // save normal hevc result

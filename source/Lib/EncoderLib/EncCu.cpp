@@ -570,11 +570,13 @@ void EncCu::xCompressCtu( CodingStructure& cs, const UnitArea& area, const unsig
   m_tileIdx = cs.pps->getTileIdx( area.lumaPos() );
 
   m_modeCtrl.initCTUEncoding( *cs.slice );
+  m_modeCtrl.devInitCtu( cs, area );   // DEV nearby-use gate and search census (EncModeCtrl.h)
 
   // init the partitioning manager
   Partitioner *partitioner = &m_partitioner;
   partitioner->initCtu( area, CH_L, *cs.slice );
-  
+  m_modeCtrl.raiseSearchDepthLimitForCheck( *partitioner, *cs.slice );   // DEV check of the capped pass; changes nothing without it
+
   const Position& lumaPos = area.lumaPos();
   const bool leftSameTile  = lumaPos.x == 0 || m_tileIdx == cs.pps->getTileIdx( lumaPos.offset(-1, 0) );
   const bool aboveSameTile = lumaPos.y == 0 || m_tileIdx == cs.pps->getTileIdx( lumaPos.offset( 0,-1) );
@@ -611,6 +613,8 @@ void EncCu::xCompressCtu( CodingStructure& cs, const UnitArea& area, const unsig
   CHECK( bestCS->cus.empty()                                   , "No possible encoding found" );
   CHECK( bestCS->cus[0]->predMode == NUMBER_OF_PREDICTION_MODES, "No possible encoding found" );
   CHECK( bestCS->cost             == MAX_DOUBLE                , "No possible encoding found" );
+
+  m_modeCtrl.devFinishCtu( *bestCS, area );   // DEV nearby-use gate and search census
 
   if ( m_wppMutex ) m_wppMutex->lock();
 
@@ -1045,7 +1049,7 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
       m_cIntraSearch.reset();
 
       // initCULevel already checked this at the CU's base QP, and nothing it reads has changed since
-      bool isReuseCU = qp == cs.baseQP ? cuECtx.isReusingCu : m_modeCtrl.isReusingCuValid( cs, partitioner, qp );
+      bool isReuseCU = qp == cs.baseQP ? cuECtx.isReusingCu : m_modeCtrl.isReusingCuValid( cs, partitioner, qp, cuECtx.mttDepthLimit );
 
       bool checkIbc = m_pcEncCfg->m_IBCMode && bestCS->picture->useIBC && (partitioner.chType == CH_L);
       if ((m_pcEncCfg->m_IBCFastMethod>3) && (cs.area.lwidth() * cs.area.lheight()) > (16 * 16))
@@ -1065,6 +1069,7 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
           EncTestMode encTestModeSkip = { ETM_MERGE_SKIP, ETO_STANDARD, qp, lossless };
           if (m_modeCtrl.tryMode(encTestModeSkip, cs, partitioner))
           {
+            DevScopedTimer devTimer( m_modeCtrl, DEV_SEARCH_MERGE );   // DEV search census (EncModeCtrl.h), like the timers below
             xCheckRDCostUnifiedMerge(tempCS, bestCS, partitioner, encTestModeSkip);
 
             CodingUnit* cu = bestCS->getCU(partitioner.chType, partitioner.treeType);
@@ -1074,10 +1079,13 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
           EncTestMode encTestMode = { ETM_INTER_ME, ETO_STANDARD, qp, lossless };
           if (m_modeCtrl.tryMode(encTestMode, cs, partitioner))
           {
+            DevScopedTimer devTimer( m_modeCtrl, DEV_SEARCH_INTER_ME );
             xCheckRDCostInter(tempCS, bestCS, partitioner, encTestMode);
           }
 
-          if (m_pcEncCfg->m_AMVRspeed)
+          // the DEV nearby-use gate stops the AMVR search where no CU nearby uses AMVR
+          // ... and the DEV smart AMVR gate where the motion search's result says it cannot pay
+          if (m_pcEncCfg->m_AMVRspeed && m_modeCtrl.devToolAllowed( DEV_TOOL_IMV ) && !m_modeCtrl.devAmvrGateStops( *bestCS ))
           {
             double bestIntPelCost = MAX_DOUBLE;
 
@@ -1087,6 +1095,7 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
               const bool skipAltHpelIF = ( int( ( encTestMode.opts & ETO_IMV ) >> ETO_IMV_SHIFT ) == 4 ) && ( bestIntPelCost > 1.25 * bestCS->cost );
               if (!skipAltHpelIF)
               {
+                DevScopedTimer devTimer( m_modeCtrl, DEV_SEARCH_IMV );
                 xCheckRDCostInterIMV(tempCS, bestCS, partitioner, encTestMode );
               }
             }
@@ -1095,6 +1104,7 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
 
         if (checkIbc && !partitioner.isConsInter())
         {
+          DevScopedTimer devTimer( m_modeCtrl, DEV_SEARCH_IBC );
           EncTestMode encTestModeIBCMerge = { ETM_IBC_MERGE, ETO_STANDARD, qp, lossless };
           if ((m_pcEncCfg->m_IBCFastMethod < 4) && (partitioner.chType == CH_L) && m_modeCtrl.tryMode(encTestModeIBCMerge, cs, partitioner))
           {
@@ -1116,6 +1126,7 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
         EncTestMode encTestMode( {ETM_INTRA, ETO_STANDARD, qp, lossless} );
         if( !partitioner.isConsInter() && m_modeCtrl.tryMode( encTestMode, cs, partitioner ) )
         {
+          DevScopedTimer devTimer( m_modeCtrl, DEV_SEARCH_INTRA );
           xCheckRDCostIntra( tempCS, bestCS, partitioner, encTestMode );
         }
       } // reusing cu
@@ -1159,6 +1170,11 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
         xCheckModeSplit( tempCS, bestCS, partitioner, encTestMode );
       }
     }
+
+    // DEV split refinement (VVENC_DEV_SPLIT_REFINE; always false without it): at the root of a multi-type tree the
+    // BT / TT splits below are searched without the deepest MTT level (the capped pass), and xRefineDeepSplits then
+    // searches the promising ones again with it. QT is outside both passes: its sub-blocks are MTT roots themselves.
+    const bool cappedSplitPass = !isBoundary && m_modeCtrl.beginCappedSplitPass( cs, partitioner );
 
     if( partitioner.canSplit( CU_HORZ_SPLIT, cs ) )
     {
@@ -1204,6 +1220,18 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
       }
     }
 
+    // The refinement pass runs here, or after the root's QT split (VVENC_DEV_SPLIT_REFINE_AFTERQT): the QT decision
+    // then reads the result of the capped pass, and the cost of the QT split decides whether the root is refined.
+    const bool refineAfterQt = cappedSplitPass && m_modeCtrl.refinesAfterQt();
+    if( cappedSplitPass )
+    {
+      m_modeCtrl.endCappedSplitPass();
+      if( !refineAfterQt )
+      {
+        xRefineDeepSplits( tempCS, bestCS, partitioner, qp );
+      }
+    }
+
     if( !cuECtx.qtBeforeBt )
     {
       EncTestMode encTestMode( { ETM_SPLIT_QT, ETO_STANDARD, qp, false } );
@@ -1212,6 +1240,11 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
         lastTestMode = encTestMode;
         xCheckModeSplit( tempCS, bestCS, partitioner, encTestMode );
       }
+    }
+
+    if( refineAfterQt )
+    {
+      xRefineDeepSplits( tempCS, bestCS, partitioner, qp );
     }
   }
 
@@ -1270,11 +1303,49 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
 }
 
 
+// Prices split flags with the MTT depth limit they are coded with. That is the partitioner's own limit, so nothing
+// changes, except in the DEV check of the capped pass (EncModeCtrl.h), which searches with a limit one higher.
+struct CodedMttDepthLimitScope
+{
+  CodedMttDepthLimitScope( Partitioner& partitioner, const unsigned codedLimit )
+    : m_partitioner( partitioner ), m_searchLimit( partitioner.maxBTD )
+  {
+    m_partitioner.maxBTD = codedLimit;
+  }
+  ~CodedMttDepthLimitScope() { m_partitioner.maxBTD = m_searchLimit; }
+
+private:
+  Partitioner&   m_partitioner;
+  const unsigned m_searchLimit;
+};
+
+// DEV split refinement, the refinement pass of an MTT root (EncModeCtrl.h): searches again the root's BT / TT splits
+// that came close to its best cost in the capped pass, this time with the deepest MTT level below the sub-splits
+// that came close to their node's best. Each result competes with the best so far like any other split.
+void EncCu::xRefineDeepSplits( CodingStructure*& tempCS, CodingStructure*& bestCS, Partitioner& partitioner, const int qp )
+{
+  const EncTestModeType btAndTtSplits[] = { ETM_SPLIT_BT_H, ETM_SPLIT_BT_V, ETM_SPLIT_TT_H, ETM_SPLIT_TT_V };
+
+  const unsigned splitsToRefine = m_modeCtrl.beginSplitRefinePass( partitioner );
+
+  for( const EncTestModeType splitType : btAndTtSplits )
+  {
+    const EncTestMode encTestMode( { splitType, ETO_STANDARD, qp, false } );
+    if( ( splitsToRefine >> getPartSplit( encTestMode ) ) & 1 )
+    {
+      xCheckModeSplit( tempCS, bestCS, partitioner, encTestMode );
+    }
+  }
+
+  m_modeCtrl.endSplitRefinePass();
+}
+
 void EncCu::xCheckModeSplit(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode )
 {
   const ModeType modeTypeParent  = partitioner.modeType;
   const TreeType treeTypeParent  = partitioner.treeType;
   const ChannelType chTypeParent = partitioner.chType;
+  const int64_t censusStartTime  = m_modeCtrl.censusClock();   // DEV MTT census (EncModeCtrl.h); 0 without it
 
   int signalModeConsVal = CS::signalModeCons( *tempCS, partitioner.currArea(), getPartSplit(encTestMode), modeTypeParent);
   int numRoundRdo = signalModeConsVal == LDT_MODE_TYPE_SIGNAL ? 2 : 1;
@@ -1331,6 +1402,7 @@ void EncCu::xCheckModeSplit(CodingStructure *&tempCS, CodingStructure *&bestCS, 
       break;
     }
   }
+  m_modeCtrl.censusAddSplitTime( encTestMode, censusStartTime );
 }
 
 void EncCu::xCheckModeSplitInternal(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode, const ModeType modeTypeParent, bool& skipInterPass )
@@ -1354,10 +1426,13 @@ void EncCu::xCheckModeSplitInternal(CodingStructure *&tempCS, CodingStructure *&
 
   m_CABACEstimator->determineNeighborCus( *tempCS, partitioner.currArea(), partitioner.chType, partitioner.treeType );
   m_CABACEstimator->resetBits           ();
-  m_CABACEstimator->split_cu_mode       ( split, *tempCS, partitioner );
-  partitioner     . modeType            = modeTypeParent;
-  m_CABACEstimator->mode_constraint     ( split, *tempCS, partitioner, modeTypeChild );
-  partitioner     . modeType            = modeTypeChild;
+  {
+    const CodedMttDepthLimitScope codedLimit( partitioner, m_modeCtrl.codedMttDepthLimit( partitioner ) );
+    m_CABACEstimator->split_cu_mode     ( split, *tempCS, partitioner );
+    partitioner     . modeType          = modeTypeParent;
+    m_CABACEstimator->mode_constraint   ( split, *tempCS, partitioner, modeTypeChild );
+    partitioner     . modeType          = modeTypeChild;
+  }
 
   const int64_t splitBits   = m_CABACEstimator->getEstFracBits();
 
@@ -1370,23 +1445,29 @@ void EncCu::xCheckModeSplitInternal(CodingStructure *&tempCS, CodingStructure *&
     double         a = -1, b = -1;
     const unsigned w       = partitioner.currArea().lwidth();
     const unsigned h       = partitioner.currArea().lheight();
-    const bool contextCond = w == h && tempCS->slice->sliceType == VVENC_B_SLICE && isLuma( partitioner.chType ) && m_pcEncCfg->m_splitCostThrParamId >= 0 && m_pcEncCfg->m_splitCostThrParamId <= 3;
+    // the split-cost thresholds are trained per MTT depth limit (table id = the configured limit); a node the DEV split
+    // refinement searches with a lowered limit (its capped pass) uses the table of that lower limit, as an encode
+    // configured with it would (unless the v9 root rule DRR_COST_TABLE keeps the picture's table there). Without the
+    // DEV switch the node's limit is the picture's and the id is unchanged.
+    const int  splitCostId = m_pcEncCfg->m_splitCostThrParamId - ( m_modeCtrl.splitCostMttDepthLimit( partitioner ) < m_modeCtrl.codedMttDepthLimit( partitioner ) ? 1 : 0 );
+    CHECKD( splitCostId > 3, "split-cost table id out of range" );
+    const bool contextCond = w == h && tempCS->slice->sliceType == VVENC_B_SLICE && isLuma( partitioner.chType ) && splitCostId >= 0 && splitCostId <= 3;
 
     if( contextCond )
     {
       uint8_t nsPredInd = m_modeCtrl.comprCUCtx->bestNsPredMode.type == ETM_INTRA;
       uint8_t szInd     = getLog2( w ) - 3;
       uint8_t splitInd  = split == CU_QUAD_SPLIT ? 1 : 0;
-      if ( m_pcEncCfg->m_splitCostThrParamId <= 1 )
+      if ( splitCostId <= 1 )
       {
-        a = coefSquareCUsFasterFastMedium[m_pcEncCfg->m_splitCostThrParamId][szInd][nsPredInd][splitInd][0];
-        b = coefSquareCUsFasterFastMedium[m_pcEncCfg->m_splitCostThrParamId][szInd][nsPredInd][splitInd][1];
+        a = coefSquareCUsFasterFastMedium[splitCostId][szInd][nsPredInd][splitInd][0];
+        b = coefSquareCUsFasterFastMedium[splitCostId][szInd][nsPredInd][splitInd][1];
       }
       else
       {
         uint8_t mtInd = (partitioner.currMtDepth == 0);
-        a = coefSquareCUsSlowSlower[m_pcEncCfg->m_splitCostThrParamId - 2][szInd][nsPredInd][partitioner.currQtDepth][mtInd][splitInd][0];
-        b = coefSquareCUsSlowSlower[m_pcEncCfg->m_splitCostThrParamId - 2][szInd][nsPredInd][partitioner.currQtDepth][mtInd][splitInd][1];
+        a = coefSquareCUsSlowSlower[splitCostId - 2][szInd][nsPredInd][partitioner.currQtDepth][mtInd][splitInd][0];
+        b = coefSquareCUsSlowSlower[splitCostId - 2][szInd][nsPredInd][partitioner.currQtDepth][mtInd][splitInd][1];
       }
     }
 
@@ -1422,6 +1503,10 @@ void EncCu::xCheckModeSplitInternal(CodingStructure *&tempCS, CodingStructure *&
     return;
   }
 
+  // DEV split stop and split census (EncModeCtrl.h): follow the search of this split part by part
+  DevSplitTry devSplitTry;
+  m_modeCtrl.devStartSplit( devSplitTry, encTestMode, *bestCS, partitioner, splitBits, modeTypeParent != MODE_TYPE_ALL || modeTypeChild != MODE_TYPE_ALL );
+
   if( partitioner.treeType == TREE_D )
   {
     if( chromaNotSplit )
@@ -1451,6 +1536,24 @@ void EncCu::xCheckModeSplitInternal(CodingStructure *&tempCS, CodingStructure *&
   }
 
   DeriveCtx deriveCtx = m_CABACEstimator->getDeriveCtx();
+
+  // what the search of a split puts back at its end, also when the DEV split stop ends it early
+  const auto restoreAfterSplit = [&]()
+  {
+    if( isAffMVInfoSaved )
+    {
+      m_cInterSearch.m_AffineProfList->addAffMVInfo(tmpMVInfo);
+    }
+
+    if( !tempCS->slice->isIntra() && isUniMvInfoSaved )
+    {
+      m_cInterSearch.m_BlkUniMvInfoBuffer->addUniMvInfo(tmpUniMvInfo);
+    }
+
+    tempCS->motionLut = oldMotionLut;
+    tempCS->releaseIntermediateData();
+    tempCS->prevQP[partitioner.chType] = oldPrevQp;
+  };
 
   do
   {
@@ -1514,6 +1617,10 @@ void EncCu::xCheckModeSplitInternal(CodingStructure *&tempCS, CodingStructure *&
 
       tempSubCS->releaseIntermediateData();
       bestSubCS->releaseIntermediateData();
+      if( m_modeCtrl.devSplitPartDone( devSplitTry, *tempCS, subCUArea.Y(), !partitioner.hasNextPart() ) )
+      {
+        break;   // DEV split stop: the parts searched cost too much already; the split ends without a result (below)
+      }
       if( !tempCS->slice->isIntra() && partitioner.isConsIntra() )
       {
         tempCS->cost = m_cRdCost.calcRdCost( tempCS->fracBits, tempCS->dist );
@@ -1540,6 +1647,18 @@ void EncCu::xCheckModeSplitInternal(CodingStructure *&tempCS, CodingStructure *&
   m_CurrCtx--;
 
   m_CABACEstimator->getDeriveCtx() = deriveCtx;
+
+  if( devSplitTry.stoppedAfter )
+  {
+    // DEV split stop: the split has no result and is not offered to the mode decision. The next mode starts from the
+    // CU's start contexts, as after an xCheckBestMode.
+    m_modeCtrl.devFinishSplit( devSplitTry, MAX_DOUBLE );
+    tempCS->cost         = MAX_DOUBLE;
+    tempCS->costDbOffset = 0;
+    m_startCtxPending    = true;
+    restoreAfterSplit();
+    return;
+  }
 
   if( chromaNotSplit )
   {
@@ -1664,22 +1783,12 @@ void EncCu::xCheckModeSplitInternal(CodingStructure *&tempCS, CodingStructure *&
     }
   }
 
+  m_modeCtrl.devFinishSplit( devSplitTry, tempCS->cost + tempCS->costDbOffset );   // DEV split stop and split census
+
   // RD check for sub partitioned coding structure.
   xCheckBestMode( tempCS, bestCS, partitioner, encTestMode, m_EDO );
 
-  if( isAffMVInfoSaved )
-  {
-    m_cInterSearch.m_AffineProfList->addAffMVInfo(tmpMVInfo);
-  }
-
-  if( !tempCS->slice->isIntra() && isUniMvInfoSaved )
-  {
-    m_cInterSearch.m_BlkUniMvInfoBuffer->addUniMvInfo(tmpUniMvInfo);
-  }
-
-  tempCS->motionLut = oldMotionLut;
-  tempCS->releaseIntermediateData();
-  tempCS->prevQP[partitioner.chType] = oldPrevQp;
+  restoreAfterSplit();
 }
 
 
@@ -2002,6 +2111,7 @@ void EncCu::xCheckRDCostUnifiedMerge( CodingStructure *&tempCS, CodingStructure 
 
   bool isCiipEnabled  = sps.CIIP && bestCS->area.lumaSize().area() >= 64 && bestCS->area.lumaSize().maxDim() < MAX_CU_SIZE;
        isCiipEnabled &= m_pcEncCfg->m_CIIP <= 1 || !m_modeCtrl.getBlkInfo( tempCS->area ).isSkip; //5
+       isCiipEnabled  = isCiipEnabled && m_modeCtrl.devToolAllowed( DEV_TOOL_CIIP );   // DEV nearby-use gate (EncModeCtrl.h)
 
   if( isCiipEnabled )
   {
@@ -2009,10 +2119,12 @@ void EncCu::xCheckRDCostUnifiedMerge( CodingStructure *&tempCS, CodingStructure 
   }
 
   const bool affineMrgAvail = ( m_pcEncCfg->m_Affine <= 2 || slice.TLayer <= 3 || m_pcEncCfg->m_SbTMVP )
-                           && ( m_pcEncCfg->m_Affine || sps.SbtMvp ) && m_pcEncCfg->m_maxNumAffineMergeCand && bestCS->area.Y().minDim() >= 8;
+                           && ( m_pcEncCfg->m_Affine || sps.SbtMvp ) && m_pcEncCfg->m_maxNumAffineMergeCand && bestCS->area.Y().minDim() >= 8
+                           && m_modeCtrl.devToolAllowed( DEV_TOOL_AFFINE_MERGE );   // DEV skipped-parent gate (EncModeCtrl.h)
 
   if( affineMrgAvail )
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_AFFINE_MERGE );   // DEV search census
     CU::getAffineMergeCand( *cu, affineMergeCtx );
     numMergeSatdCand += std::min( m_pcEncCfg->m_mergeRdCandQuotaSubBlk, affineMergeCtx.numValidMergeCand );
   }
@@ -2021,8 +2133,10 @@ void EncCu::xCheckRDCostUnifiedMerge( CodingStructure *&tempCS, CodingStructure 
   bool toAddGpmCand     = false;
   if( sps.GEO && slice.isInterB() // base checks
       && cu->lumaSize().minDim() >= GEO_MIN_CU_SIZE  && cu->lumaSize().maxDim() <= GEO_MAX_CU_SIZE && cu->lumaSize().maxDim() < 8 * cu->lumaSize().minDim() // size checks
-      && !( m_pcEncCfg->m_Geo > 2 && slice.TLayer <= 1 ) ) // speedups
+      && !( m_pcEncCfg->m_Geo > 2 && slice.TLayer <= 1 ) // speedups
+      && m_modeCtrl.devToolAllowed( DEV_TOOL_GEO ) )      // DEV nearby-use gate
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_GEO );   // DEV search census
     cu->mergeFlag            = true;
     cu->geo                  = true;
     CU::getGeoMergeCandidates( *cu, gpmMergeCtx );
@@ -2046,11 +2160,14 @@ void EncCu::xCheckRDCostUnifiedMerge( CodingStructure *&tempCS, CodingStructure 
   // add CIIP candidates directly after adding regular cands
   if( isCiipEnabled )
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_CIIP );
     addCiipCandsToPruningList( mergeCtx, localUnitArea, sqrtLambdaForFirstPass, ctxStart, distParam, *cu, sameMV );
   }
 
-  if( sps.MMVD && !!m_mergeItemList.size() && !( m_pcEncCfg->m_useFastMrg >= 2 && m_mergeItemList.size() <= 1 ) )
+  if( sps.MMVD && !!m_mergeItemList.size() && !( m_pcEncCfg->m_useFastMrg >= 2 && m_mergeItemList.size() <= 1 )
+      && m_modeCtrl.devToolAllowed( DEV_TOOL_MMVD ) )   // DEV skipped-parent gate
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_MMVD );   // DEV search census
     // With MMVD 1 most MMVD candidates are dropped: their SATD may stop once the cost reaches the drop threshold. Not with
     // fast MMVD (MMVD > 1), which costs mostly the candidates near the best offset's cost, so almost none could stop; not the
     // lossless SAD; not below 512 samples, where the HAD has too few rows of tiles to pay for the check.
@@ -2066,6 +2183,7 @@ void EncCu::xCheckRDCostUnifiedMerge( CodingStructure *&tempCS, CodingStructure 
 
   if( affineMergeCtx.numValidMergeCand > 0 )
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_AFFINE_MERGE );
     addAffineCandsToPruningList( affineMergeCtx, localUnitArea, sqrtLambdaForFirstPass, ctxStart, distParam, *cu );
   }
 
@@ -2083,6 +2201,7 @@ void EncCu::xCheckRDCostUnifiedMerge( CodingStructure *&tempCS, CodingStructure 
 
   if( toAddGpmCand )
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_GEO );
     addGpmCandsToPruningList( gpmMergeCtx, localUnitArea, sqrtLambdaForFirstPass, ctxStart, comboList, geoBuffer, distParam, *cu );
   }
 
@@ -3406,12 +3525,17 @@ void EncCu::xCheckRDCostInter( CodingStructure *&tempCS, CodingStructure *&bestC
   {
     bcwLoopNum = 1;
   }
-  
+  if( bcwLoopNum > 1 && !m_modeCtrl.devToolAllowed( DEV_TOOL_BCW ) )
+  {
+    bcwLoopNum = 1;   // DEV nearby-use gate (EncModeCtrl.h): the equal weights only, which are searched first
+  }
+
   double curBestCost = bestCS->cost;
   double equBcwCost = MAX_DOUBLE;
 
   for( int bcwLoopIdx = 0; bcwLoopIdx < bcwLoopNum; bcwLoopIdx++ )
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_BCW, g_BcwSearchOrder[bcwLoopIdx] != BCW_DEFAULT );   // DEV search census
     if( m_pcEncCfg->m_BCW == 2 )
     {
       bool isBestInter   = m_modeCtrl.getBlkInfo( bestCS->area ).isInter;
@@ -3475,6 +3599,10 @@ void EncCu::xCheckRDCostInter( CodingStructure *&tempCS, CodingStructure *&bestC
     }
 
     CHECK(!(testBcw || (!testBcw && bcwIdx == BCW_DEFAULT)), " !( bTestBcw || (!bTestBcw && bcwIdx == BCW_DEFAULT ) )");
+    if( !testBcw )
+    {
+      m_modeCtrl.devNoteMeResult( cu );   // DEV search census (v7) and smart AMVR gate: the MVDs found with equal weights
+    }
         
     xEncodeInterResidual(tempCS, bestCS, partitioner, encTestMode, 0, 0, &equBcwCost);
     
@@ -3547,6 +3675,10 @@ void EncCu::xCheckRDCostInterIMV(CodingStructure *&tempCS, CodingStructure *&bes
     {
       bcwLoopNum = 1;
     }
+    if( bcwLoopNum > 1 && !m_modeCtrl.devToolAllowed( DEV_TOOL_BCW ) )
+    {
+      bcwLoopNum = 1;   // DEV nearby-use gate (EncModeCtrl.h): the equal weights only
+    }
 
     for (int i = 1; i <= IMV_HPEL; i++)
     {
@@ -3555,6 +3687,8 @@ void EncCu::xCheckRDCostInterIMV(CodingStructure *&tempCS, CodingStructure *&bes
 
       for( int bcwLoopIdx = 0; bcwLoopIdx < bcwLoopNum; bcwLoopIdx++ )
       {
+        DevScopedTimer devTimer( m_modeCtrl, DEV_PART_BCW, g_BcwSearchOrder[bcwLoopIdx] != BCW_DEFAULT );   // DEV search census
+        DevScopedTimer devPrecisionTimer( m_modeCtrl, DevTimer( DEV_PART_IMV_FPEL + i - IMV_FPEL ) );                       // v7: AMVR by MVD precision
         if( m_pcEncCfg->m_BCW == 2 )
         {
           bool isBestInter   = m_modeCtrl.getBlkInfo( bestCS->area ).isInter;
@@ -3598,6 +3732,10 @@ void EncCu::xCheckRDCostInterIMV(CodingStructure *&tempCS, CodingStructure *&bes
             costCurStart = bestCS->cost;
           }
           if (nextimv)
+          {
+            continue;
+          }
+          if( i == IMV_4PEL && m_modeCtrl.devAmvrGateStops4Pel() )   // DEV smart AMVR gate (EncModeCtrl.h)
           {
             continue;
           }
@@ -4051,9 +4189,13 @@ void EncCu::xEncodeInterResidual( CodingStructure *&tempCS, CodingStructure *&be
   bool       doPreAnalyzeResi  = false;
   const bool mtsAllowed        =   tempCS->sps->MTSInter && cu->Y().maxDim() <= MTS_INTER_MAX_CU_SIZE;
   const uint8_t sbtAllowed     = ( tempCS->pps->picWidthInLumaSamples < SBT_FAST64_WIDTH_THRESHOLD || m_pcEncCfg->m_SBT > 1 ) && cu->Y().maxDim() > 32 ? 0 : CU::checkAllowedSbt(*cu);
+  // The DEV nearby-use gate (EncModeCtrl.h) stops the SBT pre-analysis and RD tests where no CU nearby uses SBT. The
+  // rest of the code for SBT-sized blocks still runs: it also keeps the costs that end the BCW loops.
+  const bool sbtStopped        = sbtAllowed && !m_modeCtrl.devToolAllowed( DEV_TOOL_SBT );
 
-  if( sbtAllowed )
+  if( sbtAllowed && !sbtStopped )
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_SBT );
     //SBT resolution-dependent fast algorithm: not try size-64 SBT in RDO for low-resolution sequences (now resolution below HD)
     doPreAnalyzeResi = ( sbtAllowed || mtsAllowed ) && residualPass == 0;
     m_cInterSearch.getBestSbt( tempCS, cu, histBestSbt, curPuSse, sbtAllowed, doPreAnalyzeResi, mtsAllowed );
@@ -4105,11 +4247,12 @@ void EncCu::xEncodeInterResidual( CodingStructure *&tempCS, CodingStructure *&be
 
   if( sbtAllowed && ( m_pcEncCfg->m_SBT == 1 || sbtOffRootCbf ) )
   {
+    DevScopedTimer devTimer( m_modeCtrl, DEV_PART_SBT );   // DEV search census
     bool swapped = false; // avoid unwanted data copy
     uint8_t numSbtRdo = CU::numSbtModeRdo( sbtAllowed );
     //early termination if all SBT modes are not allowed
     //normative
-    if( !sbtAllowed || skipResidual )
+    if( !sbtAllowed || skipResidual || sbtStopped )
     {
       numSbtRdo = 0;
     }
@@ -4160,6 +4303,11 @@ void EncCu::xEncodeInterResidual( CodingStructure *&tempCS, CodingStructure *&be
         {
           continue;
         }
+        // DEV smart SBT gate (EncModeCtrl.h): the prediction error is not concentrated in the part this mode codes
+        if( m_modeCtrl.devSbtGateStops( sbtMode, m_cInterSearch.getEstDistSbt( sbtMode ), m_cInterSearch.getEstDistSbt( NUMBER_SBT_MODE ) ) )
+        {
+          continue;
+        }
 
         if( sbtModeIdx > 0 )
         {
@@ -4176,6 +4324,10 @@ void EncCu::xEncodeInterResidual( CodingStructure *&tempCS, CodingStructure *&be
           }
         }
       }
+
+      // DEV search census (v7), smart SBT: what the node had before this RD test
+      const int64_t devSbtTestStart  = m_modeCtrl.censusClock();
+      const double  devSbtBestBefore = bestCS->cost;
 
       //init tempCS and TU
       if( bestCost == bestCS->cost ) //The first EMT pass didn't become the bestCS, so we clear the TUs generated
@@ -4235,6 +4387,11 @@ void EncCu::xEncodeInterResidual( CodingStructure *&tempCS, CodingStructure *&be
 
       DTRACE_MODE_COST( *tempCS, m_cRdCost.getLambda( true ) );
       xCheckBestMode( tempCS, bestCS, partitioner, encTestMode );
+      if( m_modeCtrl.devCensusOfNode() && isLuma( partitioner.chType ) )
+      {
+        m_modeCtrl.devNoteSbtTest( encTestMode, sbtMode, m_cInterSearch.getEstDistSbt( sbtMode ), m_cInterSearch.getEstDistSbt( NUMBER_SBT_MODE ),
+                                   sbtOffCost, devSbtBestBefore, histBestSbt != MAX_UCHAR, devSbtTestStart );
+      }
       STAT_COUNT_CU_MODES( partitioner.chType == CH_L, g_cuCounters1D[CU_RD_TESTS][0][!tempCS->slice->isIntra() + tempCS->slice->depth] );
       STAT_COUNT_CU_MODES( partitioner.chType == CH_L && !tempCS->slice->isIntra(), g_cuCounters2D[CU_RD_TESTS][Log2( tempCS->area.lheight() )][Log2( tempCS->area.lwidth() )] );
     }
@@ -4290,7 +4447,10 @@ void EncCu::xEncodeDontSplit( CodingStructure &cs, Partitioner &partitioner )
 {
   m_CABACEstimator->resetBits();
 
-  m_CABACEstimator->split_cu_mode( CU_DONT_SPLIT, cs, partitioner );
+  {
+    const CodedMttDepthLimitScope codedLimit( partitioner, m_modeCtrl.codedMttDepthLimit( partitioner ) );
+    m_CABACEstimator->split_cu_mode( CU_DONT_SPLIT, cs, partitioner );
+  }
   if( partitioner.treeType == TREE_C )
     CHECK( m_CABACEstimator->getEstFracBits() != 0, "must be 0 bit" );
 

@@ -266,6 +266,7 @@ public:
   std::vector<const Slice*>     ctuSlice;
   SEIMessages                   SEIs;
   BlkStat                       picBlkStat;
+  std::vector<uint32_t>         devCtuTools;        // DEV nearby-use gate (EncModeCtrl.h): the DevTool bits of each CTU's final CUs
   std::vector<OutputBitstream>  sliceDataStreams;
 
   bool                          isInitDone;

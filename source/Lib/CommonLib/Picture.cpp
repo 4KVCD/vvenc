@@ -409,6 +409,7 @@ void Picture::finalInit( const VPS& _vps, const SPS& sps, const PPS& pps, PicHea
     m_tileColsDone = new std::vector<std::atomic<int>> ( pps.pcv->heightInCtus );
   }
   std::fill( m_tileColsDone->begin(), m_tileColsDone->end(), 0 );
+  devCtuTools.assign( pps.pcv->sizeInCtus, 0 );   // DEV nearby-use gate
 
   sliceDataStreams.clear();
   sliceDataNumBins = 0;
