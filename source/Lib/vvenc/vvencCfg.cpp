@@ -2786,6 +2786,11 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
   c->m_useChromaTS                     = 0;
   c->m_TSsize                          = 3;
 
+  // search gates of smart-slower
+  c->m_fastMTTRefine                   = 0;
+  c->m_fastMEBelowSkip                 = 0;
+  c->m_fastAMVR                        = 0;
+
   switch( preset )
   {
     case vvencPresetMode::VVENC_FIRSTPASS:
@@ -3147,6 +3152,7 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
       break;
 
     case vvencPresetMode::VVENC_SLOWER:
+    case vvencPresetMode::VVENC_SMART_SLOWER:
 
       // motion estimation
       c->m_SearchRange                     = 384;
@@ -3219,6 +3225,16 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
       // scc
       c->m_IBCFastMethod                   = 1;
       c->m_TSsize                          = 5;
+
+      if( preset == vvencPresetMode::VVENC_SMART_SLOWER )
+      {
+        // the faster GEO and ISP searches, and the search gates
+        c->m_Geo                           = 2;
+        c->m_ISP                           = 3;
+        c->m_fastMTTRefine                 = 1;
+        c->m_fastMEBelowSkip               = 1;
+        c->m_fastAMVR                      = 1;
+      }
 
       break;
 
@@ -3686,6 +3702,8 @@ VVENC_DECL int vvenc_set_param(vvenc_config *c, const char *name, const char *va
                                       { "4",         vvencPresetMode::VVENC_SLOWER },
                                       { "medium_lowDecEnergy", vvencPresetMode::VVENC_MEDIUM_LOWDECNRG },
                                       { "medium_lowdecenergy", vvencPresetMode::VVENC_MEDIUM_LOWDECNRG },
+                                      { "smart-slower", vvencPresetMode::VVENC_SMART_SLOWER },
+                                      { "smart_slower", vvencPresetMode::VVENC_SMART_SLOWER },
                                       { "firstpass", vvencPresetMode::VVENC_FIRSTPASS },
                                       { "tooltest",  vvencPresetMode::VVENC_TOOLTEST },
                                       };
