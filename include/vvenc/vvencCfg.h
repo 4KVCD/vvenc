@@ -116,6 +116,9 @@ typedef enum
  VVENC_SLOW      = 3,
  VVENC_SLOWER    = 4,
  VVENC_MEDIUM_LOWDECNRG = 130,       // medium based low decoding energy
+ VVENC_SMART_SLOWER = 132,           // slower with GEO 2, ISP 3 and the search gates FastMTTRefine, FastMEBelowSkip and FastAMVR; like
+                                     // medium_lowDecEnergy (128 + medium), a variant of a ladder preset is 128 + that preset, so it
+                                     // cannot clash with the ladder 0 ... 4 or with values added to it later
  VVENC_FIRSTPASS = 254,
  VVENC_TOOLTEST  = 255,
 }vvencPresetMode;
@@ -814,7 +817,15 @@ typedef struct vvenc_config
   int8_t              m_keepHighBand;                                                    // experimental: 1: keep more fine detail at high rates (with DepQuant, on slices up to QP 27): a QT split of square CUs over 32 whose
                                                                                          // finest detail a 64-point transform would zero, and a trellis that keeps more of a luma transform's upper frequencies (default 0: off)
   int8_t              m_reservedInt8_4[1];
-  double              m_reservedDouble[6];
+  int8_t              m_fastMTTRefine;                                                   // 1: inter pictures whose MTT depth limit is the highest of the encode's (MaxMTTDepth) and 2 or 3 search BT / TT
+                                                                                         // splits with that limit lowered by one first, then search again with the full depth only the splits
+                                                                                         // that could win (default 0: off)
+  int8_t              m_fastMEBelowSkip;                                                 // 1: no motion search (ME and AMVR) in the parts of a split block whose best mode without a split is skip (default 0: off)
+  int8_t              m_fastAMVR;                                                        // 1: no AMVR search where the best mode is skip, where the motion search with quarter-sample MVDs costs more than
+                                                                                         // 1.1 times the best mode or its largest MVD is below half a sample, and no 4-sample MVDs where that MVD
+                                                                                         // is below 4 samples (default 0: off)
+  int8_t              m_reservedInt8_5[5];                                               // with the fields above in place of the first of six reserved doubles: the same layout on every ABI
+  double              m_reservedDouble[5];
   int8_t              m_veryLowQPSpeedUp;                                                // experimental: turn off tools that save no bytes at very low QPs; 0: off (default), 1: on, 2: below QP 16
                                                                                          // (with two rate-control passes the second pass decides; off with one)
   int8_t              m_mctfKeepDetail;                                                  // experimental: MCTF keeps the fine band of noisy sources; 0: off (default), 1: on, 2: below QP 16
@@ -915,7 +926,7 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *cfg );
 #define VVENC_OPT_TICKSPERSEC          "tickspersec"          // m_TicksPerSecond
 #define VVENC_OPT_INPUTBITDEPTH        "inputbitdepth"        // m_inputBitDepth
 #define VVENC_OPT_FRAMES               "framestobeencoded"    // m_framesToBeEncoded
-#define VVENC_OPT_PRESET               "preset"               // set preset like "faster,fast,medium,slow,slower,medium_lowDecEnergy
+#define VVENC_OPT_PRESET               "preset"               // set preset like "faster,fast,medium,slow,slower,medium_lowDecEnergy,smart-slower
 #define VVENC_OPT_THREADS              "threads"              // m_numThreads
 #define VVENC_OPT_BITRATE              "bitrate"              // m_RCTargetBitrate
 #define VVENC_OPT_QP                   "qp"                   // m_QP
