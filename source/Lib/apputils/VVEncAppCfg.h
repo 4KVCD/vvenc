@@ -128,6 +128,8 @@ const std::vector<SVPair<vvencPresetMode>> PresetToEnumMap =
   { "4",         vvencPresetMode::VVENC_SLOWER },
   { "medium_lowDecEnergy", vvencPresetMode::VVENC_MEDIUM_LOWDECNRG },
   { "medium_lowdecenergy", vvencPresetMode::VVENC_MEDIUM_LOWDECNRG },
+  { "smart-slower", vvencPresetMode::VVENC_SMART_SLOWER },
+  { "smart_slower", vvencPresetMode::VVENC_SMART_SLOWER },
   { "firstpass", vvencPresetMode::VVENC_FIRSTPASS },
   { "tooltest",  vvencPresetMode::VVENC_TOOLTEST },
 };
@@ -623,6 +625,9 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
   IStreamToInt8                     toMaxDeltaQP                  ( &c->m_maxDeltaQP );
   IStreamToInt8                     toBIM                         ( &c->m_blockImportanceMapping );
   IStreamToInt8                     toKeepHighBand                ( &c->m_keepHighBand );
+  IStreamToInt8                     toFastMTTRefine               ( &c->m_fastMTTRefine );
+  IStreamToInt8                     toFastMEBelowSkip             ( &c->m_fastMEBelowSkip );
+  IStreamToInt8                     toFastAMVR                    ( &c->m_fastAMVR );
   IStreamToFixedPointU8             toCuTreeStrength              ( &c->m_cuTreeStrength, 5 );
   IStreamToFixedPointU8             toPsyRD                       ( &c->m_psyRdStrengthVal, 6 );
   IStreamToFixedPointU8             toPsyRDOQ                     ( &c->m_psyRdoqStrengthVal, 6 );
@@ -715,7 +720,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
   {
     opts.setSubSection("Encoder Options");
     opts.addOptions()
-    ("preset",                                          toPreset,                                            "preset for detailed parameter configuration (faster, fast, medium, slow, slower, medium_lowDecEnergy)")
+    ("preset",                                          toPreset,                                            "preset for detailed parameter configuration (faster, fast, medium, slow, slower, medium_lowDecEnergy, smart-slower)")
     ("tune",                                            toTune,                                              "settings for a purpose, kept over --preset in any order; options after --tune override them (none; grain (experimental): keeps\n"
                                                                                                              "film grain and fine texture: QPA, MCTF and the ALF filters off, CCALF only (CCALFOnly 1), SAO on, luma\n"
                                                                                                              "deblocking offsets -3, chroma QP offsets -3 (Cb, Cr, joint), FlatInterQP 1, IntraQPOffset -1, BIM 1 with\n"
@@ -744,7 +749,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
     opts.addOptions()
     ("Threads,t",                                       c->m_numThreads,                                     "number of threads (multithreading; -1: resolution < 720p: 4, < 5K 2880p: 8, >= 5K 2880p: 12 threads)")
     ("MTProfile",                                       toMtProfile,                                         "set automatic multi-threading setting (-1: auto, 0: off, 1,2,3: on, enables tiles, IFP and WPP automatically depending on the number of threads)")
-    ("preset",                                          toPreset,                                            "select preset for specific encoding setting (faster, fast, medium, slow, slower, medium_lowDecEnergy)")
+    ("preset",                                          toPreset,                                            "select preset for specific encoding setting (faster, fast, medium, slow, slower, medium_lowDecEnergy, smart-slower)")
     ("Tune",                                            toTune,                                              "settings for a purpose, kept over --preset in any order; options after --tune override them (none; grain (experimental): keeps\n"
                                                                                                              "film grain and fine texture: QPA, MCTF and the ALF filters off, CCALF only (CCALFOnly 1), SAO on, luma\n"
                                                                                                              "deblocking offsets -3, chroma QP offsets -3 (Cb, Cr, joint), FlatInterQP 1, IntraQPOffset -1, BIM 1 with\n"
@@ -1191,6 +1196,11 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
     ("FastLocalDualTreeMode",                           c->m_fastLocalDualTreeMode,                          "Fast intra pass coding for local dual-tree in intra coding region (0:off, 1:use threshold, 2:one intra mode only)")
     ("QtbttExtraFast",                                  c->m_qtbttSpeedUp,                                   "Non-VTM compatible QTBTT speed-ups" )
     ("FastTTSplit",                                     c->m_fastTTSplit,                                    "Fast method for TT split" )
+    ("FastMTTRefine",                                   toFastMTTRefine,                                     "Two-pass BT / TT search in the inter pictures whose MTT depth limit is the highest of MaxMTTDepth's, if that is 2 or 3: "
+                                                                                                             "first with that limit lowered by one, then again with the full depth for the splits that could win (0: off, 1: on)" )
+    ("FastMEBelowSkip",                                 toFastMEBelowSkip,                                   "No motion search (ME and AMVR) in the parts of a split block whose best mode without a split is skip (0: off, 1: on)" )
+    ("FastAMVR",                                        toFastAMVR,                                          "No AMVR search where the best mode is skip, where the motion search with quarter-sample MVDs costs more than 1.1 times "
+                                                                                                             "the best mode or its largest MVD is below half a sample; no 4-sample MVDs where that MVD is below 4 samples (0: off, 1: on)" )
     ;
 
     opts.setSubSection("Threading, performance");

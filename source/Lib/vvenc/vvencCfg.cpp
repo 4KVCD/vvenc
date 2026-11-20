@@ -656,6 +656,9 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   c->m_qtbttSpeedUp                            = 1;
   c->m_qtbttSpeedUpMode                        = 0;
   c->m_fastTTSplit                             = 0;
+  c->m_fastMTTRefine                           = 0;
+  c->m_fastMEBelowSkip                         = 0;
+  c->m_fastAMVR                                = 0;
 
   c->m_fastLocalDualTreeMode                   = 0;
 
@@ -716,6 +719,7 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   c->m_ccalfOnly                               = 0;
   c->m_levelLambdaVal                          = VVENC_SET_LEVEL_LAMBDA(1.0);
 
+  memset( c->m_reservedInt8_5, 0, sizeof(c->m_reservedInt8_5) );
   memset( c->m_reservedDouble, 0, sizeof(c->m_reservedDouble) );
   memset( c->m_reservedInt8_3, 0, sizeof(c->m_reservedInt8_3) );
 
@@ -2170,6 +2174,9 @@ static bool checkCfgParameter( vvenc_config *c )
   vvenc_confirmParameter( c, c->m_FIMMode < 0 || c->m_FIMMode > 4,             "FastInferMerge out of range [0..4]");
   vvenc_confirmParameter( c, c->m_qtbttSpeedUp < 0 || c->m_qtbttSpeedUp > 7,   "QtbttExtraFast out of range [0..7]");
   vvenc_confirmParameter( c, c->m_fastTTSplit < 0 || c->m_fastTTSplit > 7,     "FastTTSplit out of range [0..7]");
+  vvenc_confirmParameter( c, c->m_fastMTTRefine < 0 || c->m_fastMTTRefine > 1, "FastMTTRefine out of range [0..1]");
+  vvenc_confirmParameter( c, c->m_fastMEBelowSkip < 0 || c->m_fastMEBelowSkip > 1, "FastMEBelowSkip out of range [0..1]");
+  vvenc_confirmParameter( c, c->m_fastAMVR < 0 || c->m_fastAMVR > 1,           "FastAMVR out of range [0..1]");
   vvenc_confirmParameter( c, c->m_MTSIntraMaxCand < 0 || c->m_MTSIntraMaxCand > 4, "MTSIntraMaxCand out of range [0..4]");
 
   const int fimModeMap[] = { 0, 3, 19, 27, 29 };
@@ -2779,6 +2786,11 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
   c->m_useChromaTS                     = 0;
   c->m_TSsize                          = 3;
 
+  // search gates of smart-slower
+  c->m_fastMTTRefine                   = 0;
+  c->m_fastMEBelowSkip                 = 0;
+  c->m_fastAMVR                        = 0;
+
   switch( preset )
   {
     case vvencPresetMode::VVENC_FIRSTPASS:
@@ -3140,6 +3152,7 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
       break;
 
     case vvencPresetMode::VVENC_SLOWER:
+    case vvencPresetMode::VVENC_SMART_SLOWER:
 
       // motion estimation
       c->m_SearchRange                     = 384;
@@ -3212,6 +3225,16 @@ VVENC_DECL int vvenc_init_preset( vvenc_config *c, vvencPresetMode preset )
       // scc
       c->m_IBCFastMethod                   = 1;
       c->m_TSsize                          = 5;
+
+      if( preset == vvencPresetMode::VVENC_SMART_SLOWER )
+      {
+        // the faster GEO and ISP searches, and the search gates
+        c->m_Geo                           = 2;
+        c->m_ISP                           = 3;
+        c->m_fastMTTRefine                 = 1;
+        c->m_fastMEBelowSkip               = 1;
+        c->m_fastAMVR                      = 1;
+      }
 
       break;
 
@@ -3549,6 +3572,12 @@ VVENC_DECL const char* vvenc_get_config_as_string( vvenc_config *c, vvencMsgLeve
     css << "ReduceFilterME:" << c->m_meReduceTap << " ";
     css << "QtbttExtraFast:" << c->m_qtbttSpeedUp << " ";
     css << "FastTTSplit:" << c->m_fastTTSplit << " ";
+    css << "FastMTTRefine:" << (int)c->m_fastMTTRefine << " ";
+    css << "FastMEBelowSkip:" << (int)c->m_fastMEBelowSkip << " ";
+    if( c->m_AMVRspeed )
+    {
+      css << "FastAMVR:" << (int)c->m_fastAMVR << " ";
+    }
     if( c->m_IBCMode )
     {
       css << "IBCFastMethod:" << c->m_IBCFastMethod << " ";
@@ -3673,6 +3702,8 @@ VVENC_DECL int vvenc_set_param(vvenc_config *c, const char *name, const char *va
                                       { "4",         vvencPresetMode::VVENC_SLOWER },
                                       { "medium_lowDecEnergy", vvencPresetMode::VVENC_MEDIUM_LOWDECNRG },
                                       { "medium_lowdecenergy", vvencPresetMode::VVENC_MEDIUM_LOWDECNRG },
+                                      { "smart-slower", vvencPresetMode::VVENC_SMART_SLOWER },
+                                      { "smart_slower", vvencPresetMode::VVENC_SMART_SLOWER },
                                       { "firstpass", vvencPresetMode::VVENC_FIRSTPASS },
                                       { "tooltest",  vvencPresetMode::VVENC_TOOLTEST },
                                       };
