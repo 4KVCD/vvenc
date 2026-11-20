@@ -128,8 +128,6 @@ const std::vector<SVPair<vvencPresetMode>> PresetToEnumMap =
   { "4",         vvencPresetMode::VVENC_SLOWER },
   { "medium_lowDecEnergy", vvencPresetMode::VVENC_MEDIUM_LOWDECNRG },
   { "medium_lowdecenergy", vvencPresetMode::VVENC_MEDIUM_LOWDECNRG },
-  { "smart-slower", vvencPresetMode::VVENC_SMART_SLOWER },
-  { "smart_slower", vvencPresetMode::VVENC_SMART_SLOWER },
   { "firstpass", vvencPresetMode::VVENC_FIRSTPASS },
   { "tooltest",  vvencPresetMode::VVENC_TOOLTEST },
 };
@@ -720,7 +718,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
   {
     opts.setSubSection("Encoder Options");
     opts.addOptions()
-    ("preset",                                          toPreset,                                            "preset for detailed parameter configuration (faster, fast, medium, slow, slower, medium_lowDecEnergy, smart-slower)")
+    ("preset",                                          toPreset,                                            "preset for detailed parameter configuration (faster, fast, medium, slow, slower, medium_lowDecEnergy)")
     ("tune",                                            toTune,                                              "settings for a purpose, kept over --preset in any order; options after --tune override them (none; grain (experimental): keeps\n"
                                                                                                              "film grain and fine texture: QPA, MCTF and the ALF filters off, CCALF only (CCALFOnly 1), SAO on, luma\n"
                                                                                                              "deblocking offsets -3, chroma QP offsets -3 (Cb, Cr, joint), FlatInterQP 1, IntraQPOffset -1, BIM 1 with\n"
@@ -749,7 +747,7 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
     opts.addOptions()
     ("Threads,t",                                       c->m_numThreads,                                     "number of threads (multithreading; -1: resolution < 720p: 4, < 5K 2880p: 8, >= 5K 2880p: 12 threads)")
     ("MTProfile",                                       toMtProfile,                                         "set automatic multi-threading setting (-1: auto, 0: off, 1,2,3: on, enables tiles, IFP and WPP automatically depending on the number of threads)")
-    ("preset",                                          toPreset,                                            "select preset for specific encoding setting (faster, fast, medium, slow, slower, medium_lowDecEnergy, smart-slower)")
+    ("preset",                                          toPreset,                                            "select preset for specific encoding setting (faster, fast, medium, slow, slower, medium_lowDecEnergy)")
     ("Tune",                                            toTune,                                              "settings for a purpose, kept over --preset in any order; options after --tune override them (none; grain (experimental): keeps\n"
                                                                                                              "film grain and fine texture: QPA, MCTF and the ALF filters off, CCALF only (CCALFOnly 1), SAO on, luma\n"
                                                                                                              "deblocking offsets -3, chroma QP offsets -3 (Cb, Cr, joint), FlatInterQP 1, IntraQPOffset -1, BIM 1 with\n"

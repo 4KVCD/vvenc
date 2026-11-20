@@ -116,9 +116,6 @@ typedef enum
  VVENC_SLOW      = 3,
  VVENC_SLOWER    = 4,
  VVENC_MEDIUM_LOWDECNRG = 130,       // medium based low decoding energy
- VVENC_SMART_SLOWER = 132,           // slower with GEO 2, ISP 3 and the search gates FastMTTRefine, FastMEBelowSkip and FastAMVR; like
-                                     // medium_lowDecEnergy (128 + medium), a variant of a ladder preset is 128 + that preset, so it
-                                     // cannot clash with the ladder 0 ... 4 or with values added to it later
  VVENC_FIRSTPASS = 254,
  VVENC_TOOLTEST  = 255,
 }vvencPresetMode;
@@ -926,7 +923,7 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *cfg );
 #define VVENC_OPT_TICKSPERSEC          "tickspersec"          // m_TicksPerSecond
 #define VVENC_OPT_INPUTBITDEPTH        "inputbitdepth"        // m_inputBitDepth
 #define VVENC_OPT_FRAMES               "framestobeencoded"    // m_framesToBeEncoded
-#define VVENC_OPT_PRESET               "preset"               // set preset like "faster,fast,medium,slow,slower,medium_lowDecEnergy,smart-slower
+#define VVENC_OPT_PRESET               "preset"               // set preset like "faster,fast,medium,slow,slower,medium_lowDecEnergy
 #define VVENC_OPT_THREADS              "threads"              // m_numThreads
 #define VVENC_OPT_BITRATE              "bitrate"              // m_RCTargetBitrate
 #define VVENC_OPT_QP                   "qp"                   // m_QP
