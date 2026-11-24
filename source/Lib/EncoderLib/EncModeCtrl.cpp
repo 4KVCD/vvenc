@@ -1197,7 +1197,7 @@ bool EncModeCtrl::useModeResult( const EncTestMode& encTestmode, CodingStructure
 
   if( m_pcEncCfg->m_fastAMVR )
   {
-    xNoteMotionSearchCost( encTestmode, *tempCS, useEDO );
+    xNoteMotionSearchCost( encTestmode, *tempCS );
   }
 
   const bool isLumaBtOrTt = isLuma( partitioner.chType ) && isBtOrTt( getPartSplit( encTestmode ) );
@@ -1477,18 +1477,18 @@ static int largestMvdInQuarterSamples( const CodingUnit& cu )
   return largest;
 }
 
-// Keeps the best cost of the motion search with quarter-sample MVDs and equal weights (called by useModeResult)
-void EncModeCtrl::xNoteMotionSearchCost( const EncTestMode& encTestmode, const CodingStructure& tempCS, const bool useEDO )
+// Keeps the best RD cost of the motion search with quarter-sample MVDs and equal weights (called by useModeResult);
+// without the deblocking cost offset of EDO, as skipsAmvrSearch compares it with the best mode's RD cost
+void EncModeCtrl::xNoteMotionSearchCost( const EncTestMode& encTestmode, const CodingStructure& tempCS )
 {
   if( encTestmode.type != ETM_INTER_ME || tempCS.cost == MAX_DOUBLE || tempCS.cus.empty() || !comprCUCtx )
   {
     return;
   }
-  const CodingUnit& cu   = *tempCS.cus.front();
-  const double      cost = tempCS.cost + ( useEDO ? tempCS.costDbOffset : 0 );   // what useModeResult compares
-  if( cu.imv == IMV_OFF && cu.BcwIdx == BCW_DEFAULT && cost < comprCUCtx->meCost )
+  const CodingUnit& cu = *tempCS.cus.front();
+  if( cu.imv == IMV_OFF && cu.BcwIdx == BCW_DEFAULT && tempCS.cost < comprCUCtx->meCost )
   {
-    comprCUCtx->meCost = cost;
+    comprCUCtx->meCost = tempCS.cost;
   }
 }
 

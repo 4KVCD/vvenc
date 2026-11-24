@@ -422,7 +422,7 @@ protected:
   bool     xChoosesSplitsToRefine ( const Partitioner& partitioner ) const;
   unsigned xSplitsToRefine        ( const ComprCUCtx& cuECtx ) const;
   void     xStoreSplitsToRefine   ( const Partitioner& partitioner );
-  void     xNoteMotionSearchCost  ( const EncTestMode& encTestmode, const CodingStructure& tempCS, const bool useEDO );
+  void     xNoteMotionSearchCost  ( const EncTestMode& encTestmode, const CodingStructure& tempCS );
   bool     xKeepIfBest            ( const EncTestMode& encTestmode, CodingStructure* tempCS, const bool useEDO );
 
 public:
