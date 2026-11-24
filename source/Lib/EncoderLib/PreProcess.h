@@ -72,6 +72,7 @@ class PreProcess : public EncStage
     bool            m_doVisAct;
     bool            m_doVisActQpa;
     bool            m_cappedCQF;
+    bool            m_fitsLostGrain;   // the film grain SEI is fitted to the grain the coding lost (EncGOP::xFitsLostGrain)
 
     // Scene cut detection for the film grain analysis: the luma histogram of the previous picture and its distance to
     // the one before it, the picture's shared data (it is marked once the next picture confirms the cut) and the

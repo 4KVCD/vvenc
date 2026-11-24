@@ -65,6 +65,7 @@ PreProcess::PreProcess( MsgLog& _m )
   , m_doVisAct   ( false )
   , m_doVisActQpa( false )
   , m_cappedCQF  ( false )
+  , m_fitsLostGrain( false )
 {
 }
 
@@ -91,6 +92,7 @@ void PreProcess::init( const VVEncCfg& encCfg, bool isFinalPass )
                          || (m_encCfg->m_LookAhead && m_encCfg->m_RCTargetBitrate > 0)
                          || (m_encCfg->m_RCNumPasses > 1 && (!isFinalPass));
   m_doVisActQpa        = m_encCfg->m_usePerceptQPA;
+  m_fitsLostGrain      = m_encCfg->m_fga >= 2 && m_encCfg->m_fg.m_fgcSEIEnabled && !m_encCfg->m_fg.m_fgcSEIPerPictureSEI;
 }
 
 
@@ -195,8 +197,8 @@ void PreProcess::xFreeUnused( Picture* pic, const PicList& picList, PicList& don
     Picture* tp  = *itr;
     bool keepPic = false;
 
-    // keep previous frames for visual activity
-    keepPic  |= ( m_doVisAct || m_cappedCQF || m_encCfg->m_GOPQPA ) && idx < NUM_QPA_PREV_FRAMES;
+    // keep previous frames for visual activity, and for the lost-grain fit, which reads the same ones
+    keepPic  |= ( m_doVisAct || m_cappedCQF || m_encCfg->m_GOPQPA || m_fitsLostGrain ) && idx < NUM_QPA_PREV_FRAMES;
     // keep previous (first) tl0 pic for sta
     keepPic  |= ! foundTl0 && ( tp->gopEntry->m_temporalId == 0 || m_doTempDown );
     foundTl0 |=                 tp->gopEntry->m_temporalId == 0;  // update found tl0
@@ -299,8 +301,9 @@ void PreProcess::xLinkPrevQpaBufs( Picture* pic, const PicList& picList ) const
 {
   PicShared* picShared = pic->m_picShared;
 
-  // find max previous pictures
-  if( m_doVisAct )
+  // find max previous pictures; the film grain SEI's fit to the lost grain reads them too
+  // (EncGOP::xStoreLostGrainSpectra), also without QPA
+  if( m_doVisAct || m_fitsLostGrain )
   {
     const Picture* prevPics[ NUM_QPA_PREV_FRAMES ];
     xGetPrevPics( pic, picList, prevPics );
