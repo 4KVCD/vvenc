@@ -3795,6 +3795,9 @@ void EncGOP::xWriteLeadingSEIs( Picture& pic, AccessUnitList& accessUnit )
   deleteSEIs( leadingSeiMessages );
 }
 
+// The definition C++14 needs for a static constexpr member that is used by address (std::copy below).
+constexpr uint8_t EncGOP::FGA_SEGMENT_MARKER_UUID[ ISO_IEC_11578_LEN ];
+
 // --fga 4: the parameter sets of the analyses finished up to this picture, each mode's behind a marker with the mode and
 // the POC it applies from (FGA_SEGMENT_MARKER_UUID), as prefix SEI NAL units; no other NAL units. With FgaStacked, then
 // --fga 2's and 3's sets of this picture fitted to the grain the given encode lost, as a real encode fits its own
