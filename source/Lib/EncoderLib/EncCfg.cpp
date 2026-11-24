@@ -60,7 +60,6 @@ VVEncCfg::VVEncCfg()
   , m_configuredQP( 0 )
   , m_QPFraction( 0.0 )
   , m_fgaStrength( 0.0 )
-  , m_fgaInterval( 0 )
   , m_psyRdStrength( 0.0 )
   , m_psyRdoqStrength( 0.0 )
 {
@@ -154,7 +153,6 @@ void VVEncCfg::xInitCfgMembers()
   m_bimCtuSize          = m_CTUSize;
   m_QPFraction          = m_QPFractionVal / 256.0;
   m_fgaStrength         = m_fgaStrengthVal / 64.0;
-  m_fgaInterval         = m_fgaIntervalLog2 >= 0 && m_fgaIntervalLog2 <= 6 ? 1 << m_fgaIntervalLog2 : m_GOPSize;
   m_psyRdStrength       = psyRdStrength( 1.0 );
   m_psyRdoqStrength     = psyRdoqStrength( 1.0 );
   m_MaxQT[0]            =

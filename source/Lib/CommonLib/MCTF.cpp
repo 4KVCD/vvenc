@@ -1056,8 +1056,8 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
   uint64_t sumSRmsAcrossPic    = 0;
   uint16_t nMax = 0, maxRmsCTU = 0;
   bool  isFilterThisFrame      = mctfIdx >= 0 && ( pic->useMCTF || pic->gopEntry->m_isStartOfGop );
-  // The film grain analysis looks at the first picture of every GOP, the pictures FgaIntervalLog2 adds
-  // (GOPCfg::xSetFgaPictures) and the first picture of every shot: the sequence's first picture and the scene cuts
+  // The film grain analysis looks at the first picture of every GOP, the pictures FgaMaxTempDepth adds
+  // (GOPCfg::xSetFgaLayer) and the first picture of every shot: the sequence's first picture and the scene cuts
   // PreProcess finds, so that no shot is given the grain of another. PreProcess marks a cut when the picture after it
   // has passed, which MCTF's future references guarantee here; with the look-ahead, pictures reach the analysis in
   // coding order, where only GOP starts keep the analyses in POC order (EncGOP::xAnalyzeFilmGrain).
@@ -1083,9 +1083,11 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
   int dropFrames = ( m_encCfg->m_usePerceptQPA ? VVENC_MCTF_RANGE >> 1 : 0 );
   if( isFilterThisFrame || fgaOnly )
   {
-    // the reference range of the picture's temporal level (for an analysis-only picture, of its position in the GOP;
-    // a shot start off the FgaIntervalLog2 positions keeps m_fgaLayer 0, the full range of a GOP start)
-    const int idxTLayer = isFilterThisFrame ? m_encCfg->m_vvencMCTF.numFrames - (mctfIdx + 1) : pic->gopEntry->m_fgaLayer;
+    // the reference range of the picture's temporal level: for an analysis-only picture that of its analysis layer,
+    // at most 4 (MCTF has a level 5 only for GOP 64 below QP 16); a shot start that FgaMaxTempDepth does not select
+    // gets level 0, the full range of a GOP start
+    const int fgaTLayer = pic->gopEntry->m_isFgaPicture ? std::min( pic->gopEntry->m_fgaLayer, 4 ) : 0;
+    const int idxTLayer = isFilterThisFrame ? m_encCfg->m_vvencMCTF.numFrames - (mctfIdx + 1) : fgaTLayer;
     const int threshold = (m_MCTFSpeedVal >> (idxTLayer * 3)) & 7;
 
     dropFrames          = std::min(VVENC_MCTF_RANGE, threshold);

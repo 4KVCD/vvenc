@@ -813,7 +813,7 @@ typedef struct vvenc_config
   int8_t              m_cuTreeLookAheadGOPs;                                             // GOPs the CU tree looks ahead (BIM 1), never more than the intra period (at least 1 GOP): 1 to 4
                                                                                          // (default -1: automatic, 1); each extra GOP costs one GOP of pictures in memory and of delay,
                                                                                          // none once the window reaches the intra period
-  int8_t              m_fgaIntervalLog2;                                                 // Film grain analysis interval: v >= 0 also analyses every (1 << v)-th picture of a GOP by its position, 1 << v must divide the GOP size (default -1: automatic, the GOP's first picture only); the GOP's first picture is always analysed
+  int8_t              m_fgaMaxTempDepth;                                                 // Film grain analysis: the pictures up to this temporal layer are analysed (default 0: key pictures only, the first coded picture of every GOP; a depth above the GOP's highest layer means all pictures)
   int8_t              m_keepHighBand;                                                    // experimental: 1: keep more fine detail at high rates (with DepQuant, on slices up to QP 27): a QT split of square CUs over 32 whose
                                                                                          // finest detail a 64-point transform would zero, and a trellis that keeps more of a luma transform's upper frequencies (default 0: off)
   int8_t              m_reservedInt8_4[1];

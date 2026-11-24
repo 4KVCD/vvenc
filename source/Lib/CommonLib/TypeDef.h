@@ -872,11 +872,11 @@ typedef struct GOPEntry : vvencGOPEntry
   int       m_gopNum;
   int       m_defaultRPLIdx;
   int       m_mctfIndex;
-  int       m_fgaLayer;          // film grain analysis: MCTF's temporal level of an m_isFgaPicture by its position (0..4)
+  int       m_fgaLayer;          // film grain analysis: the temporal id; in low delay the hierarchical layer of the position in the GOP
   bool      m_isSTSA;
   bool      m_useBckwdOnly;
   bool      m_isStartOfGop;
-  bool      m_isFgaPicture;      // film grain analysis: a picture also analysed besides the GOP's first (FgaIntervalLog2)
+  bool      m_isFgaPicture;      // film grain analysis: a picture also analysed besides the GOP's first (FgaMaxTempDepth)
   bool      m_isStartOfIntra;
   bool      m_isValid;
   bool      m_skipFirstPass;

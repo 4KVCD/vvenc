@@ -1090,11 +1090,11 @@ void FGAnalyzer::init( int width, int height, ChromaFormat chromaFormat, const i
   }
 }
 
-void FGAnalyzer::setAnalysisSpacing( int spacing, int gopSize )
+void FGAnalyzer::setAnalysesPerGop( int numAnalyses )
 {
-  // three GOPs of failed fits, exactly 3 with one analysis per GOP
-  CHECK( spacing <= 0 || spacing > gopSize, "film grain analysis spacing must be 1 to the GOP size" );
-  m_maxFailedFits = ( 3 * gopSize + spacing / 2 ) / spacing;
+  // three GOPs of failed fits
+  CHECK( numAnalyses < 1, "the film grain analysis looks at one picture per GOP at least" );
+  m_maxFailedFits = 3 * numAnalyses;
 }
 
 // Drops the data accumulated over the analysed pictures of a component.

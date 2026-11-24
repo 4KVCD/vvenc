@@ -125,11 +125,11 @@ public:
   // (--fga 1). arModel: the improved analysis with the auto-regressive grain model (--fga 3). See m_improved.
   void init( int width, int height, ChromaFormat chromaFormat, const int bitDepths[ MAX_NUM_CH ], const bool doAnalysis[ MAX_NUM_COMP ], bool improved, bool arModel = false );
 
-  // One analysis every spacing pictures in GOPs of gopSize pictures. The failed fits that end the grain
-  // (m_maxFailedFits, three per GOP) are scaled to the spacing, so that the grain ends after as many pictures as with
-  // one analysis per GOP. The data's ageing stays per analysis (ACCUMULATION_DECAY): it then follows a change of the
-  // grain faster, which measured better than keeping its span in pictures.
-  void setAnalysisSpacing( int spacing, int gopSize );
+  // The number of pictures analysed in a GOP (1: its key picture only). The failed fits that end the grain
+  // (m_maxFailedFits, three with one analysis per GOP) are scaled with it, so that the grain ends after as many
+  // pictures as with one analysis per GOP. The data's ageing stays per analysis (ACCUMULATION_DECAY): it then follows
+  // a change of the grain faster, which measured better than keeping its span in pictures.
+  void setAnalysesPerGop( int numAnalyses );
 
   // Analyses one picture: orig is the original, denoised its temporally filtered version (same size). residual is the
   // temporal residual of MCTF::fgaTemporalResidual, whose variance is residualWeight times the grain variance; without it
@@ -271,7 +271,7 @@ private:
   // so a new scene hardly changes the estimate; halving the old data lets it follow the scene within a few analyses.
   static constexpr double ACCUMULATION_DECAY = 0.5;
   // After this many analyses in a row whose scaling function fit failed, a component's grain is no longer signalled
-  // (three GOPs, see setAnalysisSpacing).
+  // (three GOPs, see setAnalysesPerGop).
   int    m_maxFailedFits     = 3;
 
   // Squared DCT coefficients of the grain, summed over the blocks with one block mean.
