@@ -3034,10 +3034,6 @@ static bool check_one_motionErrorLumaFracColumn( MCTF* ref, MCTF* opt, const Pel
 // filter and row offset, 8- and 10-bit, inputs outside the sample range.
 static bool check_motionErrorLumaFracColumn( MCTF* ref, MCTF* opt, unsigned num_cases )
 {
-  if( !opt->m_motionErrorLumaFracColumn || !opt->m_filterColumn4 )
-  {
-    return true;
-  }
   printf( "Testing MCTF::motionErrorLumaFracColumn\n" );
 
   // Always the extremes: the largest block, four vectors one row down (the most buffered rows), every horizontal filter,
@@ -3187,7 +3183,7 @@ static bool check_motionErrorLumaInt8( MCTF* ref, MCTF* opt, unsigned num_cases,
 // besterror otherwise.
 static bool check_motionErrorLumaInt4( MCTF* ref, MCTF* opt, unsigned num_cases, int w, int h )
 {
-  if( !opt->m_motionErrorLumaInt4 || ( w & 15 ) || w * h > MCTF::MAX_EXACT_INT_AREA )
+  if( ( w & 15 ) || w * h > MCTF::MAX_EXACT_INT_AREA )
   {
     return true;
   }
@@ -3236,13 +3232,16 @@ static bool check_motionErrorLumaInt4( MCTF* ref, MCTF* opt, unsigned num_cases,
         for( int besterror : { prefix - 1, prefix, prefix + 1 } )
         {
           opt->m_motionErrorLumaInt4( org.data(), orgStride, refs, bufStride, w, h, besterror, errors );
+          // bound k: the smallest of besterror and the errors of the positions before k
+          int bound = besterror;
           for( int k = 0; k < 4; k++ )
           {
-            if( exact[k] <= besterror ? errors[k] != exact[k] : errors[k] <= besterror )
+            if( exact[k] <= bound ? errors[k] != exact[k] : errors[k] <= bound )
             {
               printf( "FAILED motionErrorLumaInt4 early exit w=%d h=%d besterror=%d: position %d exact %d, returned %d\n", w, h, besterror, k, exact[k], errors[k] );
               return false;
             }
+            bound = std::min( bound, exact[k] );
           }
         }
       }

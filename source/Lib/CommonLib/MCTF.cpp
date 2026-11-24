@@ -258,6 +258,51 @@ int motionErrorLumaFrac4( const Pel* org, const ptrdiff_t origStride, const Pel*
   return error;
 }
 
+// MCTF::m_filterColumn4 in C: the horizontal pass of motionErrorLumaFrac4 for numRows rows, row r from source row r - 1.
+static void filterColumn4Core( const Pel* buf, const ptrdiff_t buffStride, const int w, const int numRows, const int16_t* xFilter, const int bitDepth, Pel* filtered )
+{
+  const Pel maxSampleValue = ( 1 << bitDepth ) - 1;
+
+  for( int r = 0; r < numRows; r++ )
+  {
+    const Pel* rowStart = buf + ( r - 1 ) * buffStride - 1;
+    for( int x = 0; x < w; x++ )
+    {
+      int sum = xFilter[0] * rowStart[x] + xFilter[1] * rowStart[x + 1] + xFilter[2] * rowStart[x + 2] + xFilter[3] * rowStart[x + 3];
+      sum = ( sum + ( 1 << 5 ) ) >> 6;
+      filtered[r * w + x] = sum < 0 ? 0 : ( sum > maxSampleValue ? maxSampleValue : sum );
+    }
+  }
+}
+
+// MCTF::m_motionErrorLumaFracColumn in C: the vertical pass of motionErrorLumaFrac4 for each vector, on the rows of
+// filterColumn4Core from rowOffset[i] on, and its exact error (no early exit).
+static void motionErrorLumaFracColumnCore( const Pel* org, const ptrdiff_t origStride, const Pel* filtered, const int w, const int h, const int num,
+                                           const int16_t* const* yFilter, const int* rowOffset, const int bitDepth, int* error )
+{
+  const Pel maxSampleValue = ( 1 << bitDepth ) - 1;
+
+  for( int i = 0; i < num; i++ )
+  {
+    const int16_t* f    = yFilter[i];
+    const Pel*     rows = filtered + rowOffset[i] * w;
+    int            sumError = 0;
+    for( int y = 0; y < h; y++ )
+    {
+      const Pel* row     = rows + y * w;
+      const Pel* origRow = org + y * origStride;
+      for( int x = 0; x < w; x++ )
+      {
+        int sum = f[0] * row[x] + f[1] * row[x + w] + f[2] * row[x + 2 * w] + f[3] * row[x + 3 * w];
+        sum = ( sum + ( 1 << 5 ) ) >> 6;
+        sum = sum < 0 ? 0 : ( sum > maxSampleValue ? maxSampleValue : sum );
+        sumError += ( sum - origRow[x] ) * ( sum - origRow[x] );
+      }
+    }
+    error[i] = sumError;
+  }
+}
+
 void applyFrac8Core_6Tap( const Pel* org, const ptrdiff_t origStride, Pel* dst, const ptrdiff_t dstStride, const int w, const int h, const int16_t* xFilter, const int16_t* yFilter, const int bitDepth )
 {
   const int numFilterTaps   = 7;
@@ -643,13 +688,13 @@ MCTF::MCTF( bool enableOpt )
 {
   m_motionErrorLumaIntX     = motionErrorLumaInt;
   m_motionErrorLumaInt8     = motionErrorLumaInt;
-  m_motionErrorLumaInt4     = nullptr;
+  m_motionErrorLumaInt4     = motionErrorLumaInt4Loop<motionErrorLumaInt>;
   m_motionErrorLumaFracX[0] = motionErrorLumaFrac6;
   m_motionErrorLumaFrac8[0] = motionErrorLumaFrac6;
   m_motionErrorLumaFracX[1] = motionErrorLumaFrac4;
   m_motionErrorLumaFrac8[1] = motionErrorLumaFrac4;
-  m_filterColumn4             = nullptr;
-  m_motionErrorLumaFracColumn = nullptr;
+  m_filterColumn4             = filterColumn4Core;
+  m_motionErrorLumaFracColumn = motionErrorLumaFracColumnCore;
   m_applyFrac[0][0]         = applyFrac8Core_6Tap;
   m_applyFrac[0][1]         = applyFrac8Core_4Tap;
   m_applyFrac[1][0]         = applyFrac8Core_6Tap;
@@ -1803,7 +1848,7 @@ void MCTF::testSubpelLattice( const PelStorage& orig, const PelStorage& buffer, 
 
   const int w = std::min<int>( bs, orig.Y().width  - x ) & ~7;
   const int h = std::min<int>( bs, orig.Y().height - y ) & ~7;
-  if( m_filterColumn4 && m_motionErrorLumaFracColumn && m_lowResFltSearch && w >= 16 && ( w & 15 ) == 0 )
+  if( m_lowResFltSearch && w >= 16 && ( w & 15 ) == 0 )
   {
     CHECKD( w > FilteredColumns::MAX_WIDTH || h > FilteredColumns::MAX_WIDTH, "The block is larger than MCTFUnitSize allows" );
     for( int i = 0; i < num; i++ )
@@ -1904,7 +1949,7 @@ class IntegerVectorQueue
 public:
   IntegerVectorQueue( const MCTF& mctf, const Pel* org, const ptrdiff_t orgStride, const int w, const int h )
     : m_mctf( mctf ), m_org( org ), m_orgStride( orgStride ), m_w( w ), m_h( h )
-    , m_enabled( mctf.m_motionErrorLumaInt4 && ( w & 15 ) == 0 && w * h <= MCTF::MAX_EXACT_INT_AREA )
+    , m_enabled( ( w & 15 ) == 0 && w * h <= MCTF::MAX_EXACT_INT_AREA )
   {
   }
 

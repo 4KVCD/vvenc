@@ -622,6 +622,7 @@ template<>
 void MCTF::_initMCTF_ARM<SVE>()
 {
   m_motionErrorLumaInt8 = motionErrorLumaInt_sve;
+  m_motionErrorLumaInt4 = motionErrorLumaInt4Loop<motionErrorLumaInt_sve>;
   m_motionErrorLumaFrac8[1] = motionErrorLumaFrac_loRes_sve;
   m_filterColumn4             = filterColumn4_common;
   m_motionErrorLumaFracColumn = motionErrorLumaFracColumn_loRes_sve;
