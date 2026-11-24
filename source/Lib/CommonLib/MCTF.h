@@ -168,19 +168,33 @@ public:
   int ( *m_motionErrorLumaIntX )( const Pel* org, const ptrdiff_t origStride, const Pel* buf, const ptrdiff_t buffStride, const int w, const int h, const int besterror );
   int ( *m_motionErrorLumaInt8 )( const Pel* org, const ptrdiff_t origStride, const Pel* buf, const ptrdiff_t buffStride, const int w, const int h, const int besterror );
   // m_motionErrorLumaInt8 for the four reference positions refs[0..3] in one call, into errors[0..3]: w is a multiple of
-  // 16 and w * h at most MAX_EXACT_INT_AREA. An error above besterror may be a partial sum, as with the one-position
-  // kernels. nullptr where no such kernel exists.
+  // 16 and w * h at most MAX_EXACT_INT_AREA. The error of position k is exact when it is not above bound k, the
+  // smallest of besterror and the errors of positions 0 to k - 1; otherwise it is some value above bound k (it may be a
+  // partial sum, as with the one-position kernels). Comparing the errors in order thus gives the same best vector as
+  // testing the four positions one after another.
   void ( *m_motionErrorLumaInt4 )( const Pel* org, const ptrdiff_t origStride, const Pel* const* refs, const ptrdiff_t buffStride, const int w, const int h, const int besterror, int* errors );
+  // m_motionErrorLumaInt4 from a one-position kernel: the four positions one after another, each stopping early against
+  // bound k as the one-position search does. The C code and the SIMD levels without a four-position kernel use it.
+  template<int ( *motionErrorLumaInt )( const Pel*, const ptrdiff_t, const Pel*, const ptrdiff_t, const int, const int, const int )>
+  static void motionErrorLumaInt4Loop( const Pel* org, const ptrdiff_t origStride, const Pel* const* refs, const ptrdiff_t buffStride, const int w, const int h, const int besterror, int* errors )
+  {
+    int bound = besterror;
+    for( int k = 0; k < 4; k++ )
+    {
+      errors[k] = motionErrorLumaInt( org, origStride, refs[k], buffStride, w, h, bound );
+      bound     = std::min( bound, errors[k] );
+    }
+  }
 
   int ( *m_motionErrorLumaFracX[2] )( const Pel* org, const ptrdiff_t origStride, const Pel* buf, const ptrdiff_t buffStride, const int w, const int h, const int16_t* xFilter, const int16_t* yFilter, const int bitDepth, const int besterror );
   int ( *m_motionErrorLumaFrac8[2] )( const Pel* org, const ptrdiff_t origStride, const Pel* buf, const ptrdiff_t buffStride, const int w, const int h, const int16_t* xFilter, const int16_t* yFilter, const int bitDepth, const int besterror );
   // The horizontal 4-tap pass of a column of vectors: numRows rows of w samples into filtered (stride w), row r from
   // source row r - 1 of buf, rounded and clipped to the sample range; w is a multiple of 16 and at most 32 (MCTFUnitSize),
-  // numRows at most 36. nullptr where no such kernel exists.
+  // numRows at most 36.
   void ( *m_filterColumn4 )( const Pel* buf, const ptrdiff_t buffStride, const int w, const int numRows, const int16_t* xFilter, const int bitDepth, Pel* filtered );
   // The exact errors (no early exit) of num <= 4 vectors that share their horizontal position, for the 4-tap filters,
   // from the rows of m_filterColumn4: vector i uses yFilter[i] and starts rowOffset[i] (0 or 1) rows below filtered; w is
-  // a multiple of 16, w and h are at most 32 (MCTFUnitSize). nullptr where no such kernel exists.
+  // a multiple of 16, w and h are at most 32 (MCTFUnitSize).
   void ( *m_motionErrorLumaFracColumn )( const Pel* org, const ptrdiff_t origStride, const Pel* filtered, const int w, const int h, const int num, const int16_t* const* yFilter, const int* rowOffset, const int bitDepth, int* error );
 
   void( *m_applyFrac[MAX_NUM_CH][2] )( const Pel* org, const ptrdiff_t origStride, Pel* dst, const ptrdiff_t dstStride, const int bsx, const int bsy, const int16_t* xFilter, const int16_t* yFilter, const int bitDepth );
