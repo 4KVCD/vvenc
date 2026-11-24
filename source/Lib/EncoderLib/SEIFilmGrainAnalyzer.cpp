@@ -4101,8 +4101,8 @@ static constexpr double LOST_GRAIN_OVERSHOOT_WEIGHT = 4.0;
 // Every band and direction may also get this share of all the lost grain's power, whatever it lost itself. Without it
 // a band that lost nothing (the coding keeps the coarsest grain longest) would allow no grain at all, since every
 // cut-off's grain reaches down to the longest periods, and the measuring noise of a band that lost little would decide
-// the scale from picture to picture. With 0.01 a band that lost a tenth of the grain (an average one of the ten) may
-// exceed it by 1.10 instead of 1.05 in amplitude.
+// the scale from picture to picture. NOT MEASURED YET: 0.01 lets a band that lost a tenth of the grain (an average one of
+// the ten) exceed it by 1.10 instead of 1.05 in amplitude.
 static constexpr double LOST_GRAIN_ALLOWANCE_FLOOR = 0.01;
 
 // What the synthesis of an intensity interval should put back, per band and direction.

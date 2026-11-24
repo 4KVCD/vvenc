@@ -90,6 +90,9 @@ private:
   bool             m_sceneCutStart = false;        // the picture starts a new scene (adaptive intra refresh mode 1)
   int              m_fgaLastSceneCutPoc = std::numeric_limits<int>::min();   // the latest scene cut before it
   bool             m_fgaShotRestart = false;       // the picture after a shot start: its analysis restarts the shot's statistics
+  // --fga 4 with FgaStacked: the spectra of the source and of the decoded encode given with it (EncGOP::
+  // storeStackedLostGrainSpectra), until its film grain SEIs are fitted
+  std::vector<LostGrainSpectrum> m_fgaLostGrainSpectra[ MAX_NUM_COMP ];
   uint64_t         m_cts;
   int              m_maxFrames;
   int              m_poc;
@@ -150,6 +153,7 @@ public:
   bool&        sceneCutStart()         { return m_sceneCutStart; }
   int&         fgaLastSceneCutPoc()    { return m_fgaLastSceneCutPoc; }
   bool&        fgaShotRestart()        { return m_fgaShotRestart; }
+  std::vector<LostGrainSpectrum>* fgaLostGrainSpectra() { return m_fgaLostGrainSpectra; }
   Size         getLumaSize()     const { return m_lumaSize; }
 
   // withSource false: the source buffer comes later, from createSource() or takeSourceFrom()

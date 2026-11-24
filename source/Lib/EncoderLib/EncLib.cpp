@@ -536,6 +536,10 @@ void EncLib::encodePicture( bool flush, const vvencYUVBuffer* yuvInBuf, AccessUn
       if( picShared )
       {
         picShared->reuse( m_picsRcvd, yuvInBuf );
+        if( m_encCfg.m_fgaStacked )
+        {
+          m_gopEncoder->storeStackedLostGrainSpectra( *yuvInBuf, *picShared );
+        }
         m_encStages[ 0 ]->addPicSorted( picShared, flush );
         m_picsRcvd  += 1;
         inputPending = false;

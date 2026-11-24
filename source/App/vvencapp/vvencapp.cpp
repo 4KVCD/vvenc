@@ -288,9 +288,19 @@ int main( int argc, char* argv[] )
   vvenc_accessUnit_alloc_payload( &AU, auSizeScale * vvenccfg.m_SourceWidth * vvenccfg.m_SourceHeight + 1024 );
 
   // --- allocate memory for YUV input picture
+  // (with --fgastacked twice as tall: the source picture on top of the decoded encode, read as one, given to the
+  // encoder as the source picture whose planes continue with the encode's)
   vvencYUVBuffer cYUVInputBuffer;
   vvenc_YUVBuffer_default( &cYUVInputBuffer );
-  vvenc_YUVBuffer_alloc_buffer( &cYUVInputBuffer, vvenccfg.m_internChromaFormat, vvenccfg.m_SourceWidth, vvenccfg.m_SourceHeight );
+  const int readHeight = vvenccfg.m_fgaStacked ? 2 * vvenccfg.m_SourceHeight : vvenccfg.m_SourceHeight;
+  vvenc_YUVBuffer_alloc_buffer( &cYUVInputBuffer, vvenccfg.m_internChromaFormat, vvenccfg.m_SourceWidth, readHeight );
+  const auto setPlaneHeights = [ &cYUVInputBuffer, &vvenccfg ]( int frameHeight )
+  {
+    for( int i = 0; i < 3; i++ )
+    {
+      cYUVInputBuffer.planes[ i ].height = vvenc_get_height_of_component( vvenccfg.m_internChromaFormat, frameHeight, i );
+    }
+  };
 
   // --- start timer
   std::chrono::steady_clock::time_point cTPStartRun = std::chrono::steady_clock::now();
@@ -377,7 +387,10 @@ int main( int argc, char* argv[] )
       vvencYUVBuffer* ptrYUVInputBuffer = nullptr;
       if( !bEof )
       {
-        if( 0 != cYuvFileInput.readYuvBuf( cYUVInputBuffer, bEof ) )
+        setPlaneHeights( readHeight );
+        const int readResult = cYuvFileInput.readYuvBuf( cYUVInputBuffer, bEof );
+        setPlaneHeights( vvenccfg.m_SourceHeight );
+        if( 0 != readResult )
         {
           msgApp( nullptr, VVENC_ERROR, "vvencapp [error]: read file failed: %s\n",cYuvFileInput.getLastError().c_str() );
           vvenc_YUVBuffer_free_buffer( &cYUVInputBuffer );

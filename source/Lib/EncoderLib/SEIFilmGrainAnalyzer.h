@@ -203,7 +203,7 @@ public:
     double seenCostOfNone     = 0.0;    // the two costs of no grain at all
     double allBandsCostOfNone = 0.0;
   };
-  // The scaling factor (0 .. largestScale) at the cut-offs of shape whose synthesized grain the eye sees
+  // The scaling factor (0 .. 127, the largest signalled) at the cut-offs of shape whose synthesized grain the eye sees
   // closest to the lost grain: the least sum over the fitted bands and directions of the band's weight times the squared
   // difference of the amplitudes, synthesized grain beyond the lost grain counting four times; among the scaling factors
   // that leave every band within its tolerance (plus a small share of all the lost grain's power). The synthesized
@@ -382,11 +382,10 @@ private:
   void limitCutoffConsecutive( ComponentID compId );
   int  limitCutoffPairs      ( std::vector<CutoffPair>& pairs, int maxUnique ) const;
 
-  void initLostGrainTables   ();
-
   // Tables of the fit to the grain the coding lost, set by init() with the improved analysis: the basis functions of the
   // 64x64 tiles' DCT ([ sample ][ frequency ]), and per component type (luma, 4:2:0 chroma) and cut-off frequency the
   // shares of the synthesized grain's variance in the tile's coefficients along one direction.
+  void initLostGrainTables   ();
   std::vector<float>  m_tileBasis;
   std::vector<double> m_synthesisMarginals;
 
