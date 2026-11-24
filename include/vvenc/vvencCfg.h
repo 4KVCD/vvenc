@@ -802,7 +802,9 @@ typedef struct vvenc_config
 #define VVENC_SET_FGA_STRENGTH(s) ((uint8_t)((s)*64+0.5))
   uint8_t             m_fgaStrengthVal;                                                  // Film grain strength as the fraction of the analysed strength, as a fixed point value with 6 fractional bits (default 1.0, 0 disables the grain)
   int8_t              m_reservedInt8_2[2];
-  int32_t             m_reservedInt32;
+  int8_t              m_reservedInt8_3[1];
+  int8_t              m_fgaMaxTempDepth;                                                 // Film grain analysis: the pictures up to this temporal layer are analysed (default 0: key pictures only, the first coded picture of every GOP; a depth above the GOP's highest layer means all pictures)
+  int8_t              m_reservedInt8_4[2];
   double              m_reservedDouble[7];
 
   // internal state variables
