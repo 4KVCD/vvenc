@@ -51,6 +51,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "CuTree.h"
 #include "EncSlice.h"
+#include "RateCtrl.h"
 #include "CommonLib/Picture.h"
 #include "Utilities/NoMallocThreadPool.h"
 
@@ -430,6 +431,7 @@ CuTree::CuTree()
   , m_predError    { nullptr, nullptr }
   , m_downsampleRow( tplDownsampleRowCore )
   , m_encCfg       ( nullptr )
+  , m_rateCtrl     ( nullptr )
   , m_threadPool   ( nullptr )
   , m_motionSearch ( true )
   , m_hadFunc      ( nullptr )
@@ -440,6 +442,7 @@ CuTree::CuTree()
   , m_blkWidth     ( 0 )
   , m_blkHeight    ( 0 )
   , m_qpBDOffset   ( 0 )
+  , m_analysisQP   ( 0 )
   , m_lambdaLeaf   ( 0.0 )
   , m_noiseVar     ( -1.0 )
 {
@@ -471,9 +474,10 @@ int CuTree::getNumLookAheadPics( const VVEncCfg& encCfg )
   return lookAhead;
 }
 
-void CuTree::init( const VVEncCfg& encCfg, NoMallocThreadPool* threadPool )
+void CuTree::init( const VVEncCfg& encCfg, const RateCtrl* rateCtrl, NoMallocThreadPool* threadPool )
 {
   m_encCfg        = &encCfg;
+  m_rateCtrl      = rateCtrl;
   m_threadPool    = threadPool;
   m_lookAheadPics = getNumLookAheadPics( encCfg );
   m_capToIntra    = m_lookAheadPics < encCfg.m_GOPSize * getCuTreeLookAheadGops( encCfg );
@@ -495,6 +499,15 @@ void CuTree::init( const VVEncCfg& encCfg, NoMallocThreadPool* threadPool )
   const CPelBuf blk( nullptr, m_blkSize, m_blkSize );
   m_hadFunc       = m_rdCost.setDistParam( blk, blk, encCfg.m_internalBitDepth[CH_L], DF_HAD ).distFunc;
 
+  xSetAnalysisQP( encCfg.m_QP );
+}
+
+// Sets the QP the analysis codes at: each picture at the QP the QP cascade gives it for this QP (xAnalyse).
+void CuTree::xSetAnalysisQP( int qp )
+{
+  const VVEncCfg& encCfg = *m_encCfg;
+  m_analysisQP = qp;
+
   // TPL weighs rate with the Lagrange multiplier of the unreferenced pictures in the QP cascade, the top temporal layer.
   // The analysis keeps the cascade's QPs (of the coding QP) also with CuTreePicStrength, which codes these pictures at
   // the coding QP; its strength is tuned for this operating point.
@@ -506,7 +519,7 @@ void CuTree::init( const VVEncCfg& encCfg, NoMallocThreadPool* threadPool )
     if( encCfg.m_GOPList[i].m_temporalId > topEntry.m_temporalId ) topEntry.copyFromGopCfg( encCfg.m_GOPList[i] );
   }
   topEntry.m_vtl = std::min( 5, encCfg.m_maxTLayer );
-  const int leafQp = Clip3( -m_qpBDOffset, MAX_QP, EncSlice::getCascadeQP( encCfg, topEntry, false, encCfg.m_QP, m_qpBDOffset ) );
+  const int leafQp = Clip3( -m_qpBDOffset, MAX_QP, EncSlice::getCascadeQP( encCfg, topEntry, false, m_analysisQP, m_qpBDOffset ) );
   m_lambdaLeaf    = qpToLambda( leafQp, encCfg.m_internalBitDepth[CH_L] );
 }
 
@@ -645,11 +658,28 @@ void CuTree::processPictures( const PicList& picList, AccessUnitList& auList, Pi
           } ), "CU-tree look-ahead capped at the intra period, but no intra picture in the window" );
 
   // Every picture is coded from reconstructed references, so the references go first: analyse in coding order.
+  const bool flush     = picList.back()->isFlush;
+  const int  windowEnd = batchEndPoc + m_lookAheadPics;
+
+  // CuTreePicStrength with look-ahead rate control: the coding QP is a guess made before the first picture (on static
+  // content 10 QP above the QPs then coded), and the picture offsets depend on the analysis QP, so the analysis follows
+  // the rate control's base QP. That comes from the pre-analysis encoder's statistics, and this stage runs before
+  // that encoder: it asks for the pictures up to two GOPs before the batch, which that encoder has coded whenever a
+  // batch is ready (it lags by less than two GOPs: it starts a picture per call while it holds more than a GOP, and
+  // a batch needs as many calls as it has pictures), so the result does not depend on timing. Not at flush, where
+  // the batches follow without it coding. Pictures analysed with an earlier batch's look-ahead keep its QP.
+  if( m_encCfg->m_cuTreePicScale > 0.0 && m_encCfg->m_LookAhead && m_encCfg->m_RCTargetBitrate > 0 && ! flush )
+  {
+    const int baseQP = m_rateCtrl->getLookAheadBaseQP( picList.front()->poc - 2 * m_encCfg->m_GOPSize );
+    if( baseQP >= 0 )
+    {
+      // the base QP is a configured QP, the analysis runs at the coding QP for it
+      xSetAnalysisQP( Clip3( 0, MAX_QP, baseQP + m_encCfg->m_QP - m_encCfg->m_configuredQP ) );
+    }
+  }
   // Only the batch and the look-ahead after it are analysed, however many pictures are queued: at flush the queue can
   // hold several GOPs when the stages before this one release pictures in a burst, and a GOP's propagation window
   // must not depend on when its pictures arrived.
-  const bool flush     = picList.back()->isFlush;
-  const int  windowEnd = batchEndPoc + m_lookAheadPics;
   std::vector<Picture*> codingOrder;
   for( auto pic : picList )
   {
@@ -915,7 +945,7 @@ void CuTree::xAnalyse( Frame& frame, Picture* pic, bool flush )
   const int numBlocks      = m_blkWidth * m_blkHeight;
 
   frame.isIntra   = gopEntry.m_sliceType == 'I';
-  frame.qp        = Clip3( -m_qpBDOffset, MAX_QP, EncSlice::getCascadeQP( *m_encCfg, gopEntry, frame.isIntra, m_encCfg->m_QP, m_qpBDOffset ) );
+  frame.qp        = Clip3( -m_qpBDOffset, MAX_QP, EncSlice::getCascadeQP( *m_encCfg, gopEntry, frame.isIntra, m_analysisQP, m_qpBDOffset ) );
 
   // the first reference picture of each list as the encoder will use it, which must be reconstructed already
   Frame* refs[2] = { nullptr, nullptr };

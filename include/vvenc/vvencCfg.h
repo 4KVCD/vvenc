@@ -806,9 +806,9 @@ typedef struct vvenc_config
   uint8_t             m_fgaStrengthVal;                                                  // Film grain strength as the fraction of the analysed strength, as a fixed point value with 6 fractional bits (default 1.0, 0 disables the grain)
   int8_t              m_adaptiveIntra;                                                   // adaptive intra refresh (0: off, 1: I pictures where they pay at scene cuts and in the slice type adaptation, 2: the cost test for the slice type adaptation only)
 #define VVENC_SET_CUTREE_PIC_STRENGTH(s) ((uint8_t)((s)*32+0.5))
-  uint8_t             m_cuTreePicStrength;                                               // CU-tree (BIM 1), random access, constant QP: picture QPs from the CU tree's dependency estimate
+  uint8_t             m_cuTreePicStrength;                                               // CU-tree (BIM 1), random access: picture QPs from the CU tree's dependency estimate
                                                                                          // in place of the temporal layers' QP offsets, scaled by this 5-bit fixed point value (default 0: off),
-                                                                                         // e.g. VVENC_SET_CUTREE_PIC_STRENGTH(2.0); the encoder then codes at QP + round( 3 + 2 * strength ),
+                                                                                         // e.g. VVENC_SET_CUTREE_PIC_STRENGTH(2.0); at constant QP the encoder codes at QP + round( 3 + 2 * strength ),
                                                                                          // to offset the lower QPs of the referenced pictures (calibrated at strength 2, GOP 32)
   int8_t              m_cuTreeLookAheadGOPs;                                             // GOPs the CU tree looks ahead (BIM 1), never more than the intra period (at least 1 GOP): 1 to 4
                                                                                          // (default -1: automatic, 1); each extra GOP costs one GOP of pictures in memory and of delay,
