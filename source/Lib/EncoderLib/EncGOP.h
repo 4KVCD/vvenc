@@ -354,12 +354,16 @@ private:
   // A random access point starts the fit over, but the pictures before it in output order that are coded after it
   // (its leading pictures) go on with the state from before it (xLostGrainStateOf). The costs the cut-offs are chosen
   // by are not started over: every picture adds its own in coding order, the older ones fading (xFitLostGrain).
+  // Nor is the grain the coded pictures' tiles hold, per component and 8-bit tile mean (FGAnalyzer::rememberTileGrain):
+  // it is the film's, whatever the scene and the random access period, and a picture whose pool tells too little of
+  // it, a scene's first picture above all, takes it from there.
   struct LostGrainStates
   {
     LostGrainState current;
     LostGrainState leading;                                  ///< of the pictures before the last random access point
     int            irapPoc = std::numeric_limits<int>::min();   ///< POC of the last random access point coded
     std::map<int, LostGrainCosts> cutoffCosts;               ///< per component
+    std::vector<LostGrainSpectrum> tileGrain[ MAX_NUM_COMP ];   ///< per 8-bit tile mean, of the pictures coded so far
   };
   LostGrainStates           m_lostGrain;   ///< the fit of the film grain SEIs to the grain the coding lost (xScaleToLostGrain)
 

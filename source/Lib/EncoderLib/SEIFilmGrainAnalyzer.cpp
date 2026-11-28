@@ -3530,9 +3530,9 @@ int FGAnalyzer::limitCutoffPairs( std::vector<CutoffPair>& pairs, int maxUnique 
 // ====================================================================================================================
 
 // The fit uses the tiles where grain shows: in every level (LOST_GRAIN_LEVEL_EDGES, of 8-bit tile means) the 30 % of the
-// original's tiles that are smoothest. The original decides, not the reconstruction: where the coding smoothed texture
-// away, the reconstruction is flat and the lost texture would be read as lost grain. Tiles darker than the first edge
-// (digital black) or from the last one (white) are not fitted.
+// original's tiles that are smoothest, as far as they are flat (flatRoughnessLimit). The original decides, not the
+// reconstruction: where the coding smoothed texture away, the reconstruction is flat and the lost texture would be read
+// as lost grain. Tiles darker than the first edge (digital black) or from the last one (white) are not fitted.
 static constexpr int LOST_GRAIN_LEVEL_EDGES[] = { 18, 33, 65, 97, 129, 161, 238 };
 static constexpr int LOST_GRAIN_NUM_LEVELS    = sizeof( LOST_GRAIN_LEVEL_EDGES ) / sizeof( LOST_GRAIN_LEVEL_EDGES[ 0 ] ) - 1;
 
@@ -3578,6 +3578,64 @@ static void tileMeanAndRoughness( const Pel* src, int stride, int& mean, double&
   }
   mean      = (int) ( ( sum + T * T / 2 ) / ( T * T ) );
   roughness = (double) squares - (double) blockSumSquares / ( B * B );
+}
+
+// The smoothest 30 % of a level are flat only where the level has that many flat tiles. Where it has few (a level of
+// faces, clothes or foliage), they are its least textured tiles, what the coding took from them is mostly texture, and
+// the fit puts that back as grain on the flat tiles of the same intensity interval: a 1080p chase (gangster_chase, QP
+// 31), one picture, tile means of 65 to 96: none of the 18 smoothest tiles was flat, the coding took 15.8 from them at
+// periods of 12.5 to 6.25 samples where the flat tiles of the interval lost 3.7, and those got 1.7 times their grain.
+// So a tile is also no rougher than FLAT_ROUGHNESS_FACTOR times a flat tile of its level, which is the tile at
+// FLAT_LEVEL_PERCENTILE of the level's tiles by roughness (the roughness of a flat tile is its grain's power, alike in
+// all of them), and no rougher than that of the rougher of the nearest levels below and above that have
+// FLAT_LEVEL_MIN_TILES tiles: a level without flat tiles is then not judged by its own texture, while its grain is
+// about that of a neighbour's. The rougher neighbour, not the smoother: the grain changes several times from one
+// level to the next where the bright levels are clean (a sky at 129 to 160 with a roughness of 1.5 per sample beside
+// 16 at 97 to 128, all of them flat tiles), and the smoother one would empty such a level.
+// The neighbours count in luma only, where the levels are of brightness, which the grain follows. The levels of a
+// chroma component are of its hue and say nothing of the grain: in The Beekeeper (4K HDR) the flat tile of the Cr means
+// from 129 has 4.4 times the roughness of that of the means below, and limited by it 10 of that level's 113 smoothest
+// tiles were left.
+// Tiles without any roughness (the chroma of black bars, which luma leaves out as digital black) hold no grain and
+// are not counted for the flat tile: they are 90 of the 480 chroma tiles of The Beekeeper, more than a tenth of their
+// level, and with one of them as the flat tile no tile with grain was left in either level (the Cb scaling factors
+// fell from 33 to 1).
+// The values are from 23 pictures of three sources (19 of the chase, Top Gun Maverick's sky and The Beekeeper, 4K
+// HDR), roughness over the reference of the level: of the smoothest 30 %, the tiles that are also among the smoothest
+// of the reconstruction reach 0.9 to 3.0 at their 90th percentile in the HDR sources and in the chase mostly up to
+// 4.2, while the levels of the chase without any such tile start at 4.5 to 12 in four of six pictures of a scene (in
+// the two others 2 and 4 of their 19 and 15 tiles are below the factor); the factor is below those. No factor parts
+// them fully: in other scenes of the chase such tiles reach 4.7 to 8.4 at their 90th percentile in the levels from
+// 65, and those above the factor are left out. With it the two HDR sources keep all their tiles in three of four
+// pictures and 90 % in the fourth. The 10th percentile still is a flat tile where an eighth of a level is flat, and
+// with the eight tiles a neighbour needs it is the smoothest of them.
+static constexpr size_t FLAT_LEVEL_PERCENTILE = 10;
+static constexpr size_t FLAT_LEVEL_MIN_TILES  = 8;
+static constexpr double FLAT_ROUGHNESS_FACTOR = 4.0;
+
+// The roughness up to which a tile of a level is flat: flatRoughness is per level that of its flat tile and numTiles
+// the number of its tiles that have any roughness; byNeighbours: the levels are of brightness.
+static double flatRoughnessLimit( const double flatRoughness[], const size_t numTiles[], int level, bool byNeighbours )
+{
+  double ofNeighbours = -1.0;   // none
+  for( int below = level - 1; byNeighbours && below >= 0; below-- )
+  {
+    if( numTiles[ below ] >= FLAT_LEVEL_MIN_TILES )
+    {
+      ofNeighbours = flatRoughness[ below ];
+      break;
+    }
+  }
+  for( int above = level + 1; byNeighbours && above < LOST_GRAIN_NUM_LEVELS; above++ )
+  {
+    if( numTiles[ above ] >= FLAT_LEVEL_MIN_TILES )
+    {
+      ofNeighbours = std::max( ofNeighbours, flatRoughness[ above ] );
+      break;
+    }
+  }
+  const double reference = ofNeighbours < 0.0 ? flatRoughness[ level ] : std::min( flatRoughness[ level ], ofNeighbours );
+  return FLAT_ROUGHNESS_FACTOR * reference;
 }
 
 // The tile of original minus reconstruction (diff[ y * T + x ]), its mean and its summed squared deviations from that
@@ -3642,16 +3700,19 @@ static void tileDct( const Pel* src, int stride, float mean, const float* basis,
   }
 }
 
-// Adds the power per band and direction of a tile of original minus reconstruction, in squared sample values (the
-// bands of a tile add up to its variance less the periods above the bands'), to sums: from the computed coefficients
-// and the tile's energy (tileDifference); what the computed coefficients do not hold of the energy is the power of the
-// finer ones. The squares of the tile's powers are added as well (FGAnalyzer::lostGrainPowerAtMost).
-static void addTilePower( const float* coef, double energy, LostGrainSpectrum& sums )
+// The power per band and direction of a tile of differences (original minus reconstruction, or minus the picture
+// before), in squared sample values (the bands of a tile add up to its variance less the periods above the bands'):
+// from the computed coefficients and the tile's energy (tileDifference); what the computed coefficients do not hold of
+// the energy is the power of the finer ones.
+static void tilePower( const float* coef, double energy, double ofTile[][ LOST_GRAIN_DIRECTIONS ] )
 {
   constexpr int    T = LOST_GRAIN_TILE, K = LOST_GRAIN_COEFFICIENTS, FINEST = LOST_GRAIN_BANDS - 1;
   constexpr double PER_SAMPLE = 1.0 / ( T * T );
   double computed = 0.0;   // the energy in the computed coefficients
-  double ofTile[ LOST_GRAIN_BANDS ][ LOST_GRAIN_DIRECTIONS ] = {};   // the tile's own powers, for their squares
+  for( int b = 0; b < LOST_GRAIN_BANDS; b++ )
+  {
+    std::fill_n( ofTile[ b ], LOST_GRAIN_DIRECTIONS, 0.0 );
+  }
   for( int v = 0; v < K; v++ )
   {
     for( int u = 0; u < K; u++ )
@@ -3664,28 +3725,126 @@ static void addTilePower( const float* coef, double energy, LostGrainSpectrum& s
         const double share      = lostGrainHorizontalShare( u, v );
         const double horizontal = share * power * PER_SAMPLE;
         const double vertical   = ( 1.0 - share ) * power * PER_SAMPLE;
-        sums.lost[ band ][ 0 ] += horizontal;
-        sums.lost[ band ][ 1 ] += vertical;
-        ofTile   [ band ][ 0 ] += horizontal;
-        ofTile   [ band ][ 1 ] += vertical;
+        ofTile[ band ][ 0 ] += horizontal;
+        ofTile[ band ][ 1 ] += vertical;
       }
     }
   }
   const double finer = std::max( 0.0, energy - computed ) * PER_SAMPLE;
-  sums.lost[ FINEST ][ 0 ] += 0.5 * finer;
-  sums.lost[ FINEST ][ 1 ] += 0.5 * finer;
-  ofTile   [ FINEST ][ 0 ] += 0.5 * finer;
-  ofTile   [ FINEST ][ 1 ] += 0.5 * finer;
+  ofTile[ FINEST ][ 0 ] += 0.5 * finer;
+  ofTile[ FINEST ][ 1 ] += 0.5 * finer;
+}
+
+// Adds share times a tile's powers (tilePower) to sums.
+static void addTilePower( const double ofTile[][ LOST_GRAIN_DIRECTIONS ], double share, double sums[][ LOST_GRAIN_DIRECTIONS ] )
+{
   for( int b = 0; b < LOST_GRAIN_BANDS; b++ )
   {
     for( int d = 0; d < LOST_GRAIN_DIRECTIONS; d++ )
     {
-      sums.lostSquared[ b ][ d ] += ofTile[ b ][ d ] * ofTile[ b ][ d ];
+      sums[ b ][ d ] += share * ofTile[ b ][ d ];
     }
   }
 }
 
-void FGAnalyzer::lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int bitDepth, std::vector<LostGrainSpectrum>& spectra ) const
+// Adds the squares of a tile's powers (tilePower) to squares (FGAnalyzer::lostGrainPowerAtMost).
+static void addSquaredTilePower( const double ofTile[][ LOST_GRAIN_DIRECTIONS ], double squares[][ LOST_GRAIN_DIRECTIONS ] )
+{
+  for( int b = 0; b < LOST_GRAIN_BANDS; b++ )
+  {
+    for( int d = 0; d < LOST_GRAIN_DIRECTIONS; d++ )
+    {
+      squares[ b ][ d ] += ofTile[ b ][ d ] * ofTile[ b ][ d ];
+    }
+  }
+}
+
+// The grain of a tile is what changes from one picture to the next: where the picture's content stays, the difference
+// of two neighbouring originals holds the grain of both, and half its power is the grain of one.
+static constexpr double TEMPORAL_GRAIN_SHARE = 0.5;
+
+// Where the content moves, the difference holds that too, and a tile's difference says nothing of its grain: such a
+// tile is left out of the grain (staysStill), in all its bands. Left in, it lowers only the fine bands, where smooth
+// moving content changes little, and the fit then moves the grain it may no longer put there to longer periods. A
+// montage under a moving camera (Top Gun 1986, 4K film scan, heavy grain), periods of 50-25 / 25-12.5 / 12.5-6.25 /
+// 6.25-3.125 samples / finer, in the fit's tiles of one picture: the coding took 1.07 / 1.37 / 1.72 / 0.44 / 0.11 and
+// half the difference is 30.3 / 7.3 / 2.7 / 0.44 / 0.08, where the 397 of its 448 tiles that stand still read 0.49 /
+// 0.55 / 0.84 / 0.24 / 0.07: the 51 that move hold nearly all of it. Limited by that difference band by band, the
+// cut-offs went from 5 / 4 to 4 / 4 and the scaling factor from 20 to 28: the decoded grain at periods of 12.5 to 6.25
+// samples rose from 0.99 to 1.31 of the source's.
+// Motion and grain are told apart by the difference's spectrum. The tiles are smooth ones, so what moves in them is
+// coarse: its difference falls by about four times per band towards the short periods (above), while the power of
+// grain per band rises or stays (white grain: four times per band, by the count of coefficients). A tile stands still
+// if the longest band (50-25 samples) has at most this share of the power of the two after it. Above, the static
+// tiles have 0.35 of it and the moving ones 3.4; in three scenes of static film scans 84 to 100 % of the fit's tiles
+// stand still (their median share 0.07 to 0.18).
+static constexpr double STATIC_TILE_COARSE_SHARE = 0.6;
+
+// Whether nothing but the grain changed in a tile from the picture before: ofTile is the power of their difference
+// (tilePower).
+static bool staysStill( const double ofTile[][ LOST_GRAIN_DIRECTIONS ] )
+{
+  const double coarse = ofTile[ 0 ][ 0 ] + ofTile[ 0 ][ 1 ];
+  const double finer  = ofTile[ 1 ][ 0 ] + ofTile[ 1 ][ 1 ] + ofTile[ 2 ][ 0 ] + ofTile[ 2 ][ 1 ];
+  return coarse <= STATIC_TILE_COARSE_SHARE * finer;
+}
+
+// The grain of a picture can repeat part of the grain of the picture before (a master made by blending neighbouring
+// pictures, or denoised over time): their difference then shows less than the grain of both, and half its power reads
+// below the grain of one. The picture two before tells: where the grain of the picture before repeats in part, the
+// difference to that one still holds the grain of both. The 1986 film montage (4K film scan), in the tiles that stand
+// still against both pictures, the power of the difference to the picture two before over that to the picture before,
+// at periods of 12.5-6.25 / 6.25-3.125 samples / finer: 1.90 / 1.86 / 2.04 in one picture and 2.96 / 2.75 / 2.75 in
+// another, but 1.17 / 1.08 / 0.97 in a third; fitted to the lower readings, single pictures got 0.54 of the lost
+// grain where the fit to all the coding took gave 0.83.
+// The difference to the picture two before is not the better measure of the grain itself: content that moves slowly
+// moved twice as far in it, which shows at the long periods even in the tiles that stand still (The Beekeeper, grain
+// that does not repeat: 1.97 / 1.60 / 1.26 at 50-25 / 25-12.5 / 12.5-6.25 samples, 1.11 / 1.02 at 6.25-3.125 samples
+// and finer). So it only tells how much of the grain the nearer difference shows, at the short periods, where
+// slow motion adds little (the bands from REPEAT_FIRST_BAND on), and all bands of the nearer difference are raised by
+// that: a repeated picture repeats the grain of every period alike (above).
+// Per tile, and the picture's value is the median of its tiles: grain repeats in all of them, while fine detail that
+// moves is in some. A picture needs REPEAT_MIN_TILES tiles standing still against both pictures to tell.
+// Up to REPEAT_ALLOWANCE times is what pictures without repeated grain read (The Beekeeper, picture by picture: 0.85
+// to 1.2 at 6.25-3.125 samples) and is not corrected, and only what is above it is: the grain is then read low by
+// up to that much, never high. Above REPEAT_MOST times the picture is all but a copy of the one before, and what
+// little differs is not its grain: such a picture says nothing of the grain.
+static constexpr int    REPEAT_FIRST_BAND = 3;   // periods of 6.25-3.125 samples, and finer
+static constexpr int    REPEAT_MIN_TILES  = 12;
+static constexpr double REPEAT_ALLOWANCE  = 1.2;
+static constexpr double REPEAT_MOST       = 4.0;
+
+// A tile's power (tilePower) in the bands that tell repeated grain.
+static double repeatTellingPower( const double ofTile[][ LOST_GRAIN_DIRECTIONS ] )
+{
+  double power = 0.0;
+  for( int b = REPEAT_FIRST_BAND; b < LOST_GRAIN_BANDS; b++ )
+  {
+    power += ofTile[ b ][ 0 ] + ofTile[ b ][ 1 ];
+  }
+  return power;
+}
+
+// By how much the grain of a picture's tiles is above what their difference to the picture before shows, since part
+// of it repeats; 0: nothing of it shows. overBefore: per tile that stands still against both pictures, the power of
+// its difference to the picture two before over that to the picture before, in the bands that tell (reordered here).
+static double repeatedGrainFactor( std::vector<double>& overBefore )
+{
+  if( (int) overBefore.size() < REPEAT_MIN_TILES )
+  {
+    return 1.0;
+  }
+  const auto median = overBefore.begin() + overBefore.size() / 2;
+  std::nth_element( overBefore.begin(), median, overBefore.end() );
+  if( *median > REPEAT_MOST )
+  {
+    return 0.0;
+  }
+  return std::max( 1.0, *median / REPEAT_ALLOWANCE );
+}
+
+void FGAnalyzer::lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, const CPelBuf& prevOrg, const CPelBuf& prevOrg2, int bitDepth,
+                                   bool luma, std::vector<LostGrainSpectrum>& spectra ) const
 {
   constexpr int T = LOST_GRAIN_TILE, K = LOST_GRAIN_COEFFICIENTS;
   spectra.clear();
@@ -3722,22 +3881,40 @@ void FGAnalyzer::lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int b
     }
   }
 
-  // the smoothest 30 % of every level (the index breaks ties, so the choice does not depend on the sort)
-  std::vector<uint8_t> selected( tiles.size(), 0 );
-  for( auto& candidates : levelTiles )
+  // the smoothest 30 % of every level (the index breaks ties, so the choice does not depend on the sort), and the
+  // level's flat tile among its tiles that have any roughness, which come after those without
+  size_t numRough[ LOST_GRAIN_NUM_LEVELS ], numSmoothest[ LOST_GRAIN_NUM_LEVELS ];
+  double flatRoughness[ LOST_GRAIN_NUM_LEVELS ];
+  for( int level = 0; level < LOST_GRAIN_NUM_LEVELS; level++ )
   {
-    const size_t keep = candidates.size() * 3 / 10;
-    std::nth_element( candidates.begin(), candidates.begin() + keep, candidates.end() );
-    for( size_t k = 0; k < keep; k++ )
+    auto& candidates = levelTiles[ level ];
+    std::sort( candidates.begin(), candidates.end() );
+    const auto   hasRoughness = []( const std::pair<double, size_t>& c ) { return c.first > 0.0; };
+    const size_t numBlank     = std::find_if( candidates.begin(), candidates.end(), hasRoughness ) - candidates.begin();
+    numSmoothest[ level ]  = candidates.size() * 3 / 10;
+    numRough[ level ]      = candidates.size() - numBlank;
+    flatRoughness[ level ] = numRough[ level ] > 0 ? candidates[ numBlank + numRough[ level ] * FLAT_LEVEL_PERCENTILE / 100 ].first : 0.0;
+  }
+  // of them the tiles that are flat (flatRoughnessLimit)
+  std::vector<uint8_t> selected( tiles.size(), 0 );
+  for( int level = 0; level < LOST_GRAIN_NUM_LEVELS; level++ )
+  {
+    const double limit = flatRoughnessLimit( flatRoughness, numRough, level, luma );
+    for( size_t k = 0; k < numSmoothest[ level ]; k++ )
     {
-      selected[ candidates[ k ].second ] = 1;
+      if( levelTiles[ level ][ k ].first <= limit )
+      {
+        selected[ levelTiles[ level ][ k ].second ] = 1;
+      }
     }
   }
 
-  // pass 2: what the coding took from the selected tiles, per 8-bit tile mean, summed in picture order
+  // pass 2: what the coding took from the selected tiles and the grain of those that stand still, per 8-bit tile mean,
+  // summed in picture order
   int slot[ 256 ];        // per 8-bit tile mean: its entry in spectra, -1: none yet
   std::fill_n( slot, 256, -1 );
-  std::vector<float> coef( K * K );
+  std::vector<float>  coef( K * K );
+  std::vector<double> overBefore;   // see repeatedGrainFactor
   Pel diff[ T * T ];
   for( size_t i = 0; i < tiles.size(); i++ )
   {
@@ -3748,8 +3925,10 @@ void FGAnalyzer::lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int b
     const Tile& t = tiles[ i ];
     float  mean;
     double energy;
+    double ofTile[ LOST_GRAIN_BANDS ][ LOST_GRAIN_DIRECTIONS ];
     tileDifference( org.bufAt( t.x, t.y ), org.stride, rec.bufAt( t.x, t.y ), rec.stride, diff, mean, energy );
     tileDct( diff, T, mean, m_tileBasis.data(), coef.data() );
+    tilePower( coef.data(), energy, ofTile );
     if( slot[ t.mean8 ] < 0 )
     {
       slot[ t.mean8 ] = (int) spectra.size();
@@ -3757,8 +3936,62 @@ void FGAnalyzer::lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int b
       spectra.back().mean8 = t.mean8;
     }
     LostGrainSpectrum& s = spectra[ slot[ t.mean8 ] ];
-    addTilePower( coef.data(), energy, s );
+    addTilePower( ofTile, 1.0, s.lost );
+    addSquaredTilePower( ofTile, s.lostSquared );
     s.tiles++;
+    // The tile's grain, from the picture before, where it shows: not without one, not where the tile only repeats it
+    // (a repeated picture, a still: no grain shows in a difference of zero, whatever the tile holds), and not where
+    // the content moved.
+    if( !prevOrg.buf )
+    {
+      continue;
+    }
+    tileDifference( org.bufAt( t.x, t.y ), org.stride, prevOrg.bufAt( t.x, t.y ), prevOrg.stride, diff, mean, energy );
+    if( energy <= 0.0 )
+    {
+      continue;
+    }
+    tileDct( diff, T, mean, m_tileBasis.data(), coef.data() );
+    tilePower( coef.data(), energy, ofTile );
+    if( !staysStill( ofTile ) )
+    {
+      continue;
+    }
+    addTilePower( ofTile, TEMPORAL_GRAIN_SHARE, s.temporal );
+    s.temporalTiles++;
+    // how much of its grain that difference shows, from the picture two before, where the tile stands still against
+    // that one too
+    const double before = repeatTellingPower( ofTile );
+    if( !prevOrg2.buf || before <= 0.0 )
+    {
+      continue;
+    }
+    tileDifference( org.bufAt( t.x, t.y ), org.stride, prevOrg2.bufAt( t.x, t.y ), prevOrg2.stride, diff, mean, energy );
+    if( energy > 0.0 )
+    {
+      tileDct( diff, T, mean, m_tileBasis.data(), coef.data() );
+      tilePower( coef.data(), energy, ofTile );
+      if( staysStill( ofTile ) )
+      {
+        overBefore.push_back( repeatTellingPower( ofTile ) / before );
+      }
+    }
+  }
+  // the grain the picture's differences do not show because it repeats (repeatedGrainFactor)
+  const double repeated = repeatedGrainFactor( overBefore );
+  for( LostGrainSpectrum& s : spectra )
+  {
+    if( repeated == 0.0 )
+    {
+      s.temporalTiles = 0;
+    }
+    for( int b = 0; repeated != 1.0 && b < LOST_GRAIN_BANDS; b++ )
+    {
+      for( int d = 0; d < LOST_GRAIN_DIRECTIONS; d++ )
+      {
+        s.temporal[ b ][ d ] *= repeated;
+      }
+    }
   }
   std::sort( spectra.begin(), spectra.end(), []( const LostGrainSpectrum& a, const LostGrainSpectrum& b ) { return a.mean8 < b.mean8; } );
 }
@@ -3773,7 +4006,93 @@ void FGAnalyzer::lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int b
 // 2.0-2.3 against 3.1), and the limit on the way up (EncGOP::xFitLostGrain) kept that layer's next eight pictures low
 // between neighbours at full strength. Where the coding keeps the grain, the difference is only its coding error,
 // which is small.
-FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPower( const LostGrainSpectrum& pooled )
+// Not all the coding removed is grain: at the long periods most of it is coding error and coarse content it smoothed
+// or shifted, which stays from picture to picture and would be put back as grain. So the lost grain is at most the
+// grain the tiles hold, what changes between the picture before and this one (LostGrainSpectrum::temporal): the mean
+// of each over its tiles before the lower one is taken, since single tiles' powers are too noisy to compare. The
+// Beekeeper (4K HDR film scan, QP 31, preset fast), in the fit's own tiles: at periods of 25-12.5 samples the coding
+// took 3.14 where the grain is 1.37, at 12.5-6.25 samples 3.78 against 2.78, at 6.25-3.125 samples 4.60 against 4.26.
+// Fitted to all the coding took, the decoded grain read 1.27 times the tiles' grain at periods of 25 to 6.25 samples,
+// above the tolerance of 1.05.
+// The grain is that of the tiles that stand still (lostGrainSpectra), which holds for the moving ones of their
+// brightness as well: it is the film's. So it also holds from picture to picture and from scene to scene, and where
+// the pictures a fit pools have too few tiles standing still to tell it, the tiles of that brightness of the pictures
+// coded before tell it (tileGrain).
+
+// The grain of an intensity interval's tiles is known from TILE_GRAIN_KNOWN_TILES of them that stand still: the band of
+// the longest fitted periods has about 31 coefficients per tile and direction, so that many give its power to 3.5 %.
+// It is also how much is remembered of the pictures coded before, per 8-bit tile mean (rememberTileGrain).
+static constexpr int TILE_GRAIN_KNOWN_TILES = 48;
+
+// What the pooled pictures lack of TILE_GRAIN_KNOWN_TILES standing tiles is made up by the pictures coded before, and
+// what those lack too counts as tiles whose grain is all the coding took, which is the fit without any knowledge of
+// the grain: the grain moves between the three by the tiles each has, and no count of tiles switches it. With a count
+// that did (12 standing tiles of the pool, and of every picture fitted alone, else all the coding took), the brightest
+// interval of Top Gun's sky, with 0 to 19 standing tiles among 12 to 22 per picture, had the count in 7 of 65
+// pictures fitted alone and not in the others, and the first picture of a scene, which has no picture of its scene
+// before it, was fitted to all the coding took and the next one to the grain: the decoded grain stepped by 0.126 of
+// itself from the one to the other (hangar; 0.072 at that cut when fitted to all the coding took throughout), and by
+// 0.529 against 0.400 into a scene with no standing tiles at all (sky).
+FGAnalyzer::TileGrain FGAnalyzer::tileGrain( const LostGrainSpectrum& pooled, const LostGrainSpectrum& earlier )
+{
+  TileGrain grain;
+  if( pooled.tiles <= 0 )
+  {
+    return grain;
+  }
+  const int ofPool    = pooled.temporalTiles;
+  const int ofEarlier = std::min( earlier.temporalTiles, std::max( 0, TILE_GRAIN_KNOWN_TILES - ofPool ) );
+  const int unknown   = std::max( 0, TILE_GRAIN_KNOWN_TILES - ofPool - ofEarlier );
+  for( int b = 0; b < LostGrainPower::BANDS; b++ )
+  {
+    for( int d = 0; d < LostGrainPower::DIRECTIONS; d++ )
+    {
+      double sum = pooled.temporal[ b ][ d ] + unknown * pooled.lost[ b ][ d ] / pooled.tiles;
+      if( ofEarlier > 0 )
+      {
+        sum += ofEarlier * earlier.temporal[ b ][ d ] / earlier.temporalTiles;
+      }
+      grain.power[ b ][ d ] = sum / ( ofPool + ofEarlier + unknown );
+    }
+  }
+  return grain;
+}
+
+// Per 8-bit tile mean the sums of the latest TILE_GRAIN_KNOWN_TILES standing tiles count: older ones fade as new ones
+// of their brightness come, and not with the pictures, so a scene under a moving camera keeps the grain of the scene
+// before it however long it lasts.
+void FGAnalyzer::rememberTileGrain( const std::vector<LostGrainSpectrum>& ofPicture, std::vector<LostGrainSpectrum>& earlier )
+{
+  constexpr int MEANS = 256;
+  if( earlier.empty() )
+  {
+    earlier.resize( MEANS );
+    for( int mean8 = 0; mean8 < MEANS; mean8++ )
+    {
+      earlier[ mean8 ].mean8 = mean8;
+    }
+  }
+  for( const LostGrainSpectrum& s : ofPicture )
+  {
+    if( s.temporalTiles <= 0 )
+    {
+      continue;
+    }
+    LostGrainSpectrum& e = earlier[ s.mean8 ];
+    e.temporalTiles += s.temporalTiles;
+    const double kept = std::min( 1.0, double( TILE_GRAIN_KNOWN_TILES ) / e.temporalTiles );
+    for( int b = 0; b < LostGrainSpectrum::BANDS; b++ )
+    {
+      for( int d = 0; d < LostGrainSpectrum::DIRECTIONS; d++ )
+      {
+        e.temporal[ b ][ d ] = kept * ( e.temporal[ b ][ d ] + s.temporal[ b ][ d ] );
+      }
+    }
+    e.temporalTiles = std::min( e.temporalTiles, TILE_GRAIN_KNOWN_TILES );
+  }
+}
+
+FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPower( const LostGrainSpectrum& pooled, const TileGrain& grain )
 {
   LostGrainPower p;
   p.tiles = pooled.tiles;
@@ -3785,7 +4104,7 @@ FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPower( const LostGrainSpectrum& 
   {
     for( int d = 0; d < LostGrainPower::DIRECTIONS; d++ )
     {
-      p.lost[ b ][ d ] = pooled.lost[ b ][ d ] / pooled.tiles;
+      p.lost[ b ][ d ] = std::min( pooled.lost[ b ][ d ] / pooled.tiles, grain.power[ b ][ d ] );
     }
   }
   return p;
@@ -3796,9 +4115,14 @@ FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPower( const LostGrainSpectrum& 
 // are other ones in every picture. This many standard errors of the mean are what that error explains.
 static constexpr double LOST_GRAIN_STANDARD_ERRORS = 2.0;
 
-FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPowerAtMost( const LostGrainSpectrum& ofPicture )
+// As in lostGrainPower the lost grain is at most the grain the tiles hold, which is the pool's for every picture of
+// it: the grain is the film's, and a picture differs from its neighbours in what the coding took from it. With each
+// picture limited by the grain its own standing tiles showed, the lowest of the pool's fits was that of the picture
+// whose difference showed least (the montage's repeated pictures, see repeatedGrainFactor), or of the one picture
+// that had standing tiles enough to count.
+FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPowerAtMost( const LostGrainSpectrum& ofPicture, const TileGrain& grain )
 {
-  LostGrainPower p = lostGrainPower( ofPicture );
+  LostGrainPower p = lostGrainPower( ofPicture, grain );
   const int tiles = ofPicture.tiles;
   if( tiles < 2 )
   {
@@ -3808,9 +4132,9 @@ FGAnalyzer::LostGrainPower FGAnalyzer::lostGrainPowerAtMost( const LostGrainSpec
   {
     for( int d = 0; d < LostGrainPower::DIRECTIONS; d++ )
     {
-      const double mean     = p.lost[ b ][ d ];
+      const double mean     = ofPicture.lost[ b ][ d ] / tiles;
       const double variance = std::max( 0.0, ofPicture.lostSquared[ b ][ d ] - tiles * mean * mean ) / ( tiles - 1 );   // of a tile's power
-      p.lost[ b ][ d ]      = mean + LOST_GRAIN_STANDARD_ERRORS * std::sqrt( variance / tiles );
+      p.lost[ b ][ d ]      = std::min( mean + LOST_GRAIN_STANDARD_ERRORS * std::sqrt( variance / tiles ), grain.power[ b ][ d ] );
     }
   }
   return p;

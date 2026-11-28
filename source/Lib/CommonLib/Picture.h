@@ -137,8 +137,10 @@ struct PicApsGlobal{
 
 // Film grain analysis: what the coding took from a picture component's flat 64x64 original tiles with one 8-bit tile
 // mean: the power of original minus reconstruction per band of periods and direction (FGAnalyzer::LostGrainPower),
-// summed over the tiles (FGAnalyzer::lostGrainSpectra). The film grain SEI is fitted to the grain the coding lost
-// (EncGOP::xScaleToLostGrain).
+// summed over the tiles (FGAnalyzer::lostGrainSpectra), and beside it the grain such tiles hold: what changes from
+// the picture before to this one (temporal), summed over those of the tiles whose content stands still. The film grain
+// SEI is fitted to the grain the coding lost, at most the grain the tiles hold (FGAnalyzer::tileGrain,
+// FGAnalyzer::lostGrainPower, EncGOP::xScaleToLostGrain).
 struct LostGrainSpectrum
 {
   static constexpr int BANDS      = 5;
@@ -147,17 +149,23 @@ struct LostGrainSpectrum
   int    tiles = 0;
   double lost       [ BANDS ][ DIRECTIONS ] = {};   // the power of original minus reconstruction
   double lostSquared[ BANDS ][ DIRECTIONS ] = {};   // the squares of the single tiles' powers: how far the tiles differ
+  // half the power of original minus the original of the picture before, of the temporalTiles tiles among them that
+  // show their grain in it: there is a picture before, and nothing but the grain changed from it
+  int    temporalTiles = 0;
+  double temporal[ BANDS ][ DIRECTIONS ] = {};
 
   // Adds the tiles and powers of other (the sums of an intensity interval, of several pictures).
   void add( const LostGrainSpectrum& other )
   {
-    tiles += other.tiles;
+    tiles         += other.tiles;
+    temporalTiles += other.temporalTiles;
     for( int b = 0; b < BANDS; b++ )
     {
       for( int d = 0; d < DIRECTIONS; d++ )
       {
         lost       [ b ][ d ] += other.lost       [ b ][ d ];
         lostSquared[ b ][ d ] += other.lostSquared[ b ][ d ];
+        temporal   [ b ][ d ] += other.temporal   [ b ][ d ];
       }
     }
   }

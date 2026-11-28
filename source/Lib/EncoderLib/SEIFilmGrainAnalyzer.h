@@ -148,9 +148,13 @@ public:
   // The film grain SEI fitted to the grain the coding lost, as the eye sees it. lostGrainSpectra: for one component of
   // a coded picture, what the coding took from the original's smoothest 64x64 tiles (the 30 % with the least
   // roughness per level of tile means): the power of original minus reconstruction per band of periods and direction
-  // and per 8-bit tile mean, in ascending order (read by several threads at once: it changes no state). Empty before
-  // init() with the improved analysis.
-  void lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, int bitDepth, std::vector<LostGrainSpectrum>& spectra ) const;
+  // and per 8-bit tile mean, in ascending order (read by several threads at once: it changes no state). Beside it, the
+  // grain those of the tiles hold whose content stands still: half the power of the original minus prevOrg, the
+  // original of the picture before it in output order, raised by what prevOrg2, the one before that, tells of grain
+  // that prevOrg repeats (an empty buffer: there is none of its scene). luma: the component is luma, whose levels are
+  // of brightness. Empty before init() with the improved analysis.
+  void lostGrainSpectra( const CPelBuf& org, const CPelBuf& rec, const CPelBuf& prevOrg, const CPelBuf& prevOrg2, int bitDepth,
+                         bool luma, std::vector<LostGrainSpectrum>& spectra ) const;
   // An intensity interval's summed spectra reduced to the mean grain power per tile, in squared sample values, that
   // the coding took in each band of periods (50-25, 25-12.5, 12.5-6.25, 6.25-3.125 samples of the component, and
   // finer) and direction (once per interval: it does not depend on the cut-offs tried).
@@ -158,13 +162,24 @@ public:
   {
     static constexpr int BANDS      = 5;
     static constexpr int DIRECTIONS = 2;   // 0: the horizontal frequency is the higher one, 1: the vertical one
-    double lost[ BANDS ][ DIRECTIONS ] = {};   // the power of original minus reconstruction
+    double lost[ BANDS ][ DIRECTIONS ] = {};   // the power of original minus reconstruction, at most the tiles' grain
     int    tiles                       = 0;
   };
-  static LostGrainPower lostGrainPower( const LostGrainSpectrum& pooled );
-  // The most one picture's tiles of an interval say the coding took: their mean power per band and direction plus two
-  // standard errors of that mean, from how far the tiles' powers differ (LostGrainSpectrum::lostSquared).
-  static LostGrainPower lostGrainPowerAtMost( const LostGrainSpectrum& ofPicture );
+  // The grain an intensity interval's tiles hold, per band and direction like LostGrainPower: the mean of the pooled
+  // pictures' tiles that stand still (LostGrainSpectrum::temporal); where those are few, also of earlier, the tiles of
+  // the interval's brightness of the pictures coded before (kept by rememberTileGrain, which adds a picture's spectra
+  // to them), and with neither it is all the coding took.
+  struct TileGrain
+  {
+    double power[ LostGrainPower::BANDS ][ LostGrainPower::DIRECTIONS ] = {};
+  };
+  static TileGrain tileGrain( const LostGrainSpectrum& pooled, const LostGrainSpectrum& earlier );
+  static void      rememberTileGrain( const std::vector<LostGrainSpectrum>& ofPicture, std::vector<LostGrainSpectrum>& earlier );
+  static LostGrainPower lostGrainPower( const LostGrainSpectrum& pooled, const TileGrain& grain );
+  // The most one picture's tiles of an interval say the coding took of their grain: per band and direction the mean
+  // power plus two standard errors of that mean, from how far the tiles' powers differ (LostGrainSpectrum::lostSquared),
+  // at most the grain of the tiles of the picture's pool.
+  static LostGrainPower lostGrainPowerAtMost( const LostGrainSpectrum& ofPicture, const TileGrain& grain );
   // How the bands count in the fit of one intensity interval of a component.
   struct LostGrainBands
   {

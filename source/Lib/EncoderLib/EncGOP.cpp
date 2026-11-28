@@ -3016,17 +3016,30 @@ bool EncGOP::xFilmGrainSeiNeeded( const Slice& slice, const SeiFgc& sei, ChromaF
 // the difference between the original's smoothest 64x64 tiles and the reconstruction, and the sum of its squares, per
 // 8-bit tile mean (the intensity intervals are known only when the SEI is written). Runs when the picture is finished, before its reconstruction can be released; only where
 // xScaleToLostGrain uses them (xFitsLostGrain).
+// Beside it, the grain those tiles hold, from the original of the picture before it in output order (the link QPA
+// reads too, PreProcess::xLinkPrevQpaBufs, held until the picture is encoded): of the two neighbours it is the one
+// that is always there. The next one may belong to a group of pictures that has not arrived, or be coded already
+// with its source lent to new input (xReleasePictures). Not across a scene cut, where the difference is of two
+// scenes, and not for the first picture, which is linked to itself. The original two before it, by the same link,
+// tells where the one before it repeats part of its grain (FGAnalyzer::lostGrainSpectra): only where both are of the
+// picture's scene, so not for the picture after a scene cut either (every picture carries the latest cut before it).
 void EncGOP::xStoreLostGrainSpectra( Picture& pic ) const
 {
   if( !xFitsLostGrain() )
   {
     return;
   }
+  const bool startsScene   = pic.m_picShared->fgaSceneCut();
+  const bool secondOfScene = pic.m_picShared->fgaLastSceneCutPoc() == pic.poc - 1;
   for( int c = 0; c < getNumberValidComponents( pic.chromaFormat ); c++ )
   {
-    const ComponentID compId = ComponentID( c );
-    m_fgAnalyzer.lostGrainSpectra( pic.getOrigBuf( compId ), pic.getRecoBuf( compId ),
-                                   m_pcEncCfg->m_internalBitDepth[ toChannelType( compId ) ], pic.lostGrainSpectra[ c ] );
+    const ComponentID compId   = ComponentID( c );
+    const CPelBuf     org      = pic.getOrigBuf( compId );
+    const CPelBuf     linked   = pic.getOrigBufPrev( compId, PREV_FRAME_1 );
+    const CPelBuf     prevOrg  = startsScene || linked.buf == org.buf ? CPelBuf() : linked;
+    const CPelBuf     prevOrg2 = !prevOrg.buf || secondOfScene ? CPelBuf() : pic.getOrigBufPrev( compId, PREV_FRAME_2 );
+    m_fgAnalyzer.lostGrainSpectra( org, pic.getRecoBuf( compId ), prevOrg, prevOrg2, m_pcEncCfg->m_internalBitDepth[ toChannelType( compId ) ],
+                                   isLuma( compId ), pic.lostGrainSpectra[ c ] );
   }
 }
 
@@ -3192,6 +3205,8 @@ static std::vector<LostGrainSpectrum> lostGrainIntervalSums( const std::vector<L
 // are those of the source's grain). Per component: the summed spectra of each interval over the picture's pool
 // (xLostGrainPool), over the pool's near pictures (LOST_GRAIN_POOL_SPAN) and of each of its pictures that is fitted
 // alone (xLostGrainFittedAlone), then xFitLostGrain or xFitLostGrainAr, on the picture's state (xLostGrainStateOf).
+// None of them is fitted to more than the grain the interval's tiles hold (FGAnalyzer::tileGrain), which the pool's
+// standing tiles tell, or else those of the pictures coded before (LostGrainStates::tileGrain).
 void EncGOP::xScaleToLostGrain( Picture& pic, const Slice& slice, SeiFgc& sei )
 {
   LostGrainState& state = xLostGrainStateOf( pic, slice );
@@ -3228,17 +3243,14 @@ void EncGOP::xScaleToLostGrain( Picture& pic, const Slice& slice, SeiFgc& sei )
     const int  n         = cm.numIntensityIntervals;
     const bool chroma420 = c != COMP_Y && pic.chromaFormat == CHROMA_420;
     // the intervals' sums of all pictures of the pool, of the near ones and of each picture that is fitted alone, reduced
-    // to the grain power the coding lost per band (of a single picture: the most its tiles say it lost)
+    // to the grain power the coding lost per band (of a single picture: the most its tiles say it lost), each at most
+    // the grain the pool's tiles hold, which the pictures coded before tell where the pool's do not
     std::vector<LostGrainSpectrum> poolSums( n ), nearSums( n );
-    std::vector<std::vector<FGAnalyzer::LostGrainPower>> picturePower;   // [ picture fitted alone ][ interval ]
+    std::vector<std::vector<LostGrainSpectrum>> aloneSums;   // [ picture fitted alone ][ interval ]
     for( size_t p = 0; p < pool.size(); p++ )
     {
-      const std::vector<LostGrainSpectrum> sums   = lostGrainIntervalSums( pool[ p ]->spectra[ c ], cm );
-      const bool                           isNear = std::abs( pool[ p ]->poc - pic.poc ) <= LOST_GRAIN_POOL_SPAN;
-      if( fittedAlone[ p ] )
-      {
-        picturePower.emplace_back();
-      }
+      std::vector<LostGrainSpectrum> sums   = lostGrainIntervalSums( pool[ p ]->spectra[ c ], cm );
+      const bool                     isNear = std::abs( pool[ p ]->poc - pic.poc ) <= LOST_GRAIN_POOL_SPAN;
       for( int i = 0; i < n; i++ )
       {
         poolSums[ i ].add( sums[ i ] );
@@ -3246,19 +3258,26 @@ void EncGOP::xScaleToLostGrain( Picture& pic, const Slice& slice, SeiFgc& sei )
         {
           nearSums[ i ].add( sums[ i ] );
         }
-        if( fittedAlone[ p ] )
-        {
-          picturePower.back().push_back( FGAnalyzer::lostGrainPowerAtMost( sums[ i ] ) );
-        }
+      }
+      if( fittedAlone[ p ] )
+      {
+        aloneSums.push_back( std::move( sums ) );
       }
     }
+    const std::vector<LostGrainSpectrum> earlier = lostGrainIntervalSums( m_lostGrain.tileGrain[ c ], cm );
     std::vector<FGAnalyzer::LostGrainPower> power( n ), nearPower( n );
     std::vector<FGAnalyzer::LostGrainBands> bands( n );
+    std::vector<std::vector<FGAnalyzer::LostGrainPower>> picturePower( aloneSums.size() );   // [ picture fitted alone ][ interval ]
     for( int i = 0; i < n; i++ )
     {
-      power[ i ]     = FGAnalyzer::lostGrainPower( poolSums[ i ] );
-      nearPower[ i ] = FGAnalyzer::lostGrainPower( nearSums[ i ] );
+      const FGAnalyzer::TileGrain grain = FGAnalyzer::tileGrain( poolSums[ i ], earlier[ i ] );
+      power[ i ]     = FGAnalyzer::lostGrainPower( poolSums[ i ], grain );
+      nearPower[ i ] = FGAnalyzer::lostGrainPower( nearSums[ i ], grain );
       bands[ i ]     = lostGrainBandsOf( *m_pcEncCfg, c == COMP_Y, chroma420, cm.intensityValues[ i ] );
+      for( size_t p = 0; p < aloneSums.size(); p++ )
+      {
+        picturePower[ p ].push_back( FGAnalyzer::lostGrainPowerAtMost( aloneSums[ p ][ i ], grain ) );
+      }
     }
     const ComponentID compId   = ComponentID( c );
     const int         bitDepth = m_pcEncCfg->m_internalBitDepth[ toChannelType( compId ) ];
@@ -3272,6 +3291,11 @@ void EncGOP::xScaleToLostGrain( Picture& pic, const Slice& slice, SeiFgc& sei )
                      bands, cm );
     }
     eraseOtherIntervals( state.fitted, c, slice.TLayer, cm );
+  }
+  // the grain the picture's tiles hold, for the pictures coded after it
+  for( int c = 0; c < getNumberValidComponents( pic.chromaFormat ); c++ )
+  {
+    FGAnalyzer::rememberTileGrain( state.pictures.back().spectra[ c ], m_lostGrain.tileGrain[ c ] );
   }
   if( sei.filmGrainModelId == 0 )   // the AR model's log2 scale factor is the unit of its filter too: its fit stays in range
   {
